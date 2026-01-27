@@ -14,11 +14,9 @@
 
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/reflection/field_traits.h"
 
 namespace pypto {
@@ -30,7 +28,7 @@ namespace ir {
  * Used for efficient type checking and casting without RTTI overhead.
  * Each concrete IR node class has a unique Kind value.
  */
-enum class IRNodeKind {
+enum class ObjectKind {
   // Base kinds (abstract base classes)
   IRNode,
   Expr,
@@ -98,7 +96,11 @@ enum class IRNodeKind {
 
   // Other IR node kinds
   Function,
-  Program
+  Program,
+
+  // Op kinds
+  Op,
+  GlobalVar
 };
 
 /**
@@ -166,9 +168,9 @@ class IRNode {
   /**
    * @brief Get the Kind of this IR node
    *
-   * @return The IRNodeKind enum value identifying the concrete type
+   * @return The ObjectKind enum value identifying the concrete type
    */
-  [[nodiscard]] virtual IRNodeKind GetKind() const = 0;
+  [[nodiscard]] virtual ObjectKind GetKind() const = 0;
 
   /**
    * @brief Get the type name of this IR node
@@ -211,45 +213,33 @@ inline bool operator!=(const IRNodePtr& lhs, const IRNodePtr& rhs) { return !(lh
 template <typename T>
 struct KindTrait;
 
-/**
- * @brief Check if an IR node is of a specific type
- *
- * @tparam T The target type (e.g., Var, AssignStmt, TensorType)
- * @param node The IR node pointer to check
- * @return true if node is of type T, false otherwise
- *
- * @example
- * if (IsA<Var>(expr)) {
- *   // expr is a Var
- * }
- */
-template <typename T>
-bool IsA(const IRNodePtr& node) {
-  return node && node->GetKind() == KindTrait<T>::kind;
-}
+// SFINAE helpers to detect trait type
+namespace detail {
+// Detect if KindTrait<T> has a 'kind' member (concrete type)
+template <typename T, typename = void>
+struct HasSingleKind : std::false_type {};
 
-/**
- * @brief Safely cast an IR node to a specific type
- *
- * Uses static_pointer_cast for zero runtime overhead after Kind check.
- *
- * @tparam T The target type (e.g., Var, AssignStmt, TensorType)
- * @param node The IR node pointer to cast
- * @return Shared pointer to T if cast succeeds, nullptr otherwise
- *
- * @example
- * if (auto var = As<Var>(expr)) {
- *   // Use var safely
- *   std::cout << var->name_;
- * }
- */
 template <typename T>
-std::shared_ptr<const T> As(const IRNodePtr& node) {
-  if (IsA<T>(node)) {
-    return std::static_pointer_cast<const T>(node);
+struct HasSingleKind<T, std::void_t<decltype(KindTrait<T>::kind)>> : std::true_type {};
+
+// Detect if KindTrait<T> has a 'kinds' member (base class)
+template <typename T, typename = void>
+struct HasKindArray : std::false_type {};
+
+template <typename T>
+struct HasKindArray<T, std::void_t<decltype(KindTrait<T>::kinds)>> : std::true_type {};
+
+// Check if kind is in array (compile-time)
+template <typename T>
+constexpr bool IsKindInArray(ObjectKind kind) {
+  for (size_t i = 0; i < KindTrait<T>::count; ++i) {
+    if (KindTrait<T>::kinds[i] == kind) {
+      return true;
+    }
   }
-  return nullptr;
+  return false;
 }
+}  // namespace detail
 
 }  // namespace ir
 }  // namespace pypto
