@@ -9,75 +9,76 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/basic_memory_reuse_pass.h"
-
 #include <algorithm>
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
-#include "pypto/ir/transform/dependency_analyzer.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/dependency_analyzer.h"
+#include "pypto/ir/transforms/dependency_graph.h"
+#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
-FunctionPtr BasicMemoryReusePass::Run(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "BasicMemoryReusePass cannot run on null function";
+/**
+ * @brief Lifetime interval for a TileType variable (based on topological order)
+ */
+struct LifetimeInterval {
+  VarPtr variable;           ///< The variable
+  int def_point;             ///< Definition point (topological order)
+  int last_use_point;        ///< Last use point (topological order)
+  MemorySpace memory_space;  ///< Memory space
+  uint64_t size;             ///< Size in bytes
+};
 
-  // Step 1: Use DependencyAnalyzer to get dependency graph
-  DependencyAnalyzer analyzer;
-  DependencyGraph graph = analyzer.Analyze(func);
+namespace {
 
-  LOG_INFO << "Analyzed " << graph.blocks.size() << " blocks, " << graph.dependencies.size() << " edges";
+/**
+ * @brief Assign topological order to all statements in basic blocks
+ */
+std::map<StmtPtr, int> AssignDeclarationOrder(const std::vector<BasicBlock>& blocks) {
+  std::map<StmtPtr, int> order;
+  int current_order = 0;
 
-  if (graph.blocks.empty()) {
-    LOG_WARN << "No basic blocks found, skipping memory reuse";
-    return func;
+  // Traverse blocks in order and assign order to each statement
+  for (const auto& block : blocks) {
+    for (const auto& stmt : block.statements) {
+      order[stmt] = current_order++;
+    }
   }
 
-  // Step 2: Compute lifetimes based on dependency graph
-  auto lifetimes = ComputeLifetimesFromDependencies(graph.blocks, graph.dependencies);
-  LOG_INFO << "Computed lifetimes for " << lifetimes.size() << " variables";
+  LOG_DEBUG << "Assigned declaration order to " << order.size() << " statements";
 
-  if (lifetimes.empty()) {
-    LOG_INFO << "No TileType variables found, skipping memory reuse";
-    return func;
-  }
-
-  // Step 3: Identify reuse opportunities
-  auto reuse_map = IdentifyReuseOpportunities(lifetimes);
-  LOG_INFO << "Found " << reuse_map.size() << " memory reuse opportunities";
-
-  if (reuse_map.empty()) {
-    LOG_INFO << "No memory reuse opportunities, returning original function";
-    return func;
-  }
-
-  // Step 4: Apply MemRef sharing
-  StmtPtr new_body = ApplyMemRefSharing(func->body_, reuse_map);
-
-  return std::make_shared<const Function>(func->name_, func->params_, func->return_types_, new_body,
-                                          func->span_);
+  return order;
 }
 
-std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependencies(
+/**
+ * @brief Compute lifetime intervals from dependencies
+ *
+ * This function identifies memory reuse opportunities using ONLY dependency
+ * relationships (topological ordering), NOT execution timing simulation.
+ */
+std::vector<LifetimeInterval> ComputeLifetimesFromDependencies(
     const std::vector<BasicBlock>& blocks, const std::vector<DependencyEdge>& dependencies) {
   std::vector<LifetimeInterval> lifetimes;
 
-  // Step 1: Assign declaration order to all statements
-  // ASSUMPTION: Input Function IR already satisfies topological ordering
+  // Step 1: Assign topological order to all statements
   auto stmt_order = AssignDeclarationOrder(blocks);
 
   if (stmt_order.empty()) {
-    LOG_WARN << "No statements found in blocks";
+    LOG_WARN << "Failed to compute topological order";
     return lifetimes;
   }
 
@@ -106,14 +107,15 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
         if (tile_type) {
           ordered_vars.push_back(assign->var_);  // Preserve definition order
           var_def_stmt[assign->var_] = stmt;
+        }
 
-          // Collect variables used in the value expression
-          VarUseCollector collector;
-          collector.VisitExpr(assign->value_);
+        // Collect variables used in the value expression (for ALL AssignStmt, not just TileType)
+        // This ensures we capture uses in statements like: result = store(tile_e, ...)
+        VarUseCollector collector;
+        collector.VisitExpr(assign->value_);
 
-          for (const auto& used_var : collector.used_vars) {
-            var_use_stmts[used_var].push_back(stmt);
-          }
+        for (const auto& used_var : collector.used_vars) {
+          var_use_stmts[used_var].push_back(stmt);
         }
       } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
         // Collect variable uses
@@ -143,11 +145,16 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
     // Last use point (find maximum order among all use statements)
     int last_use = def_point;  // At least def point
     if (var_use_stmts.count(var)) {
+      LOG_DEBUG << "Variable " << var->name_ << " has " << var_use_stmts[var].size() << " use statements";
       for (const auto& use_stmt : var_use_stmts[var]) {
         if (stmt_order.count(use_stmt)) {
-          last_use = std::max(last_use, stmt_order[use_stmt]);
+          int use_order = stmt_order[use_stmt];
+          LOG_DEBUG << "  Use at order " << use_order;
+          last_use = std::max(last_use, use_order);
         }
       }
+    } else {
+      LOG_DEBUG << "Variable " << var->name_ << " has no recorded uses";
     }
 
     // Create lifetime interval
@@ -167,8 +174,10 @@ std::vector<LifetimeInterval> BasicMemoryReusePass::ComputeLifetimesFromDependen
   return lifetimes;
 }
 
-std::map<VarPtr, VarPtr> BasicMemoryReusePass::IdentifyReuseOpportunities(
-    const std::vector<LifetimeInterval>& lifetimes) {
+/**
+ * @brief Identify memory reuse opportunities from lifetime intervals
+ */
+std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Build a fast lookup map: VarPtr -> LifetimeInterval for O(1) access
@@ -241,9 +250,9 @@ std::map<VarPtr, VarPtr> BasicMemoryReusePass::IdentifyReuseOpportunities(
           // Can safely reuse!
           reuse_map[curr_var] = prev_var;
           memref_users[prev_var].push_back(curr_var);  // Track this reuse relationship
-          LOG_INFO << "Variable " << curr_var->name_ << " can reuse " << prev_var->name_ << " (lifetime ["
-                   << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "]"
-                   << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";
+          LOG_DEBUG << "Variable " << curr_var->name_ << " can reuse " << prev_var->name_ << " (lifetime ["
+                    << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "]"
+                    << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";
           break;  // Found a reuse target, stop searching
         }
       }
@@ -253,8 +262,10 @@ std::map<VarPtr, VarPtr> BasicMemoryReusePass::IdentifyReuseOpportunities(
   return reuse_map;
 }
 
-StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
-                                                 const std::map<VarPtr, VarPtr>& reuse_map) {
+/**
+ * @brief Apply MemRef sharing to the statement tree
+ */
+StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& reuse_map) {
   // Custom IRMutator for MemRef sharing
   class MemRefSharingMutator : public IRMutator {
    public:
@@ -327,21 +338,51 @@ StmtPtr BasicMemoryReusePass::ApplyMemRefSharing(const StmtPtr& stmt,
   return mutator.VisitStmt(stmt);
 }
 
-std::map<StmtPtr, int> BasicMemoryReusePass::AssignDeclarationOrder(const std::vector<BasicBlock>& blocks) {
-  std::map<StmtPtr, int> order;
-  int current_order = 0;
+/**
+ * @brief Transform a function by identifying and applying memory reuse
+ *
+ * This transformation identifies memory reuse opportunities using ONLY dependency
+ * relationships (topological ordering), NOT execution timing simulation.
+ * Variables that can share memory will point to the same MemRef object.
+ */
+FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "BasicMemoryReusePass cannot run on null function";
 
-  // Traverse blocks in order and assign order to each statement
-  for (const auto& block : blocks) {
-    for (const auto& stmt : block.statements) {
-      order[stmt] = current_order++;
-    }
+  // Step 1: Use DependencyAnalyzer to get dependency graph
+  DependencyAnalyzer analyzer;
+  DependencyGraph graph = analyzer.Analyze(func);
+
+  if (graph.blocks.empty()) {
+    LOG_WARN << "No basic blocks found, skipping memory reuse";
+    return func;
   }
 
-  LOG_DEBUG << "Assigned declaration order to " << order.size() << " statements";
+  // Step 2: Compute lifetimes based on dependency graph
+  auto lifetimes = ComputeLifetimesFromDependencies(graph.blocks, graph.dependencies);
 
-  return order;
+  if (lifetimes.empty()) {
+    LOG_WARN << "No TileType variables found, skipping memory reuse";
+    return func;
+  }
+
+  // Step 3: Identify reuse opportunities
+  auto reuse_map = IdentifyReuseOpportunities(lifetimes);
+
+  if (reuse_map.empty()) {
+    return func;
+  }
+
+  // Step 4: Apply MemRef sharing
+  StmtPtr new_body = ApplyMemRefSharing(func->body_, reuse_map);
+
+  return std::make_shared<const Function>(func->name_, func->params_, func->return_types_, new_body,
+                                          func->span_);
 }
 
+}  // namespace
+
+namespace pass {
+Pass BasicMemoryReuse() { return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse"); }
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

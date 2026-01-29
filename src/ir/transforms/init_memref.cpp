@@ -9,8 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/init_memref.h"
-
 #include <memory>
 #include <set>
 #include <string>
@@ -23,8 +21,9 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -42,9 +41,9 @@ class MemRefUsageVisitor : public IRVisitor {
     }
   }
 
-  const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
+  [[nodiscard]] const std::set<std::string>& GetDdrVars() const { return ddr_vars_; }
 
-  void VisitStmt_(const AssignStmtPtr& op) {
+  void VisitStmt_(const AssignStmtPtr& op) override {
     // Check if the right-hand side is a block.store call
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
       if (call->op_->name_ == "block.store") {
@@ -90,7 +89,7 @@ class MemRefUsageVisitor : public IRVisitor {
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars), next_id_(0) {}
+  explicit InitMemRefMutator(const std::set<std::string>& ddr_vars) : ddr_vars_(ddr_vars) {}
 
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const std::string& var_name) {
@@ -180,7 +179,7 @@ class InitMemRefMutator : public IRMutator {
   ExprPtr VisitExpr_(const IterArgPtr& op) override { return GetNewVar(op); }
 
   // Handle block.store specially: return value should share the same MemRef as the 6th argument
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) {
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
 
@@ -224,12 +223,17 @@ class InitMemRefMutator : public IRMutator {
  private:
   const std::set<std::string>& ddr_vars_;
   std::unordered_map<std::string, VarPtr> var_map_;
-  uint64_t next_id_;  // Counter for generating unique MemRef IDs
+  uint64_t next_id_ = 0;  // Counter for generating unique MemRef IDs
 };
 
-}  // namespace
-
-FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
+/**
+ * @brief Transform a function by initializing MemRef for all variables
+ *
+ * This transformation initializes the MemRef field for all Var nodes in the function.
+ * It sets memory space to UB by default, or DDR for variables used in
+ * block.load/block.store operations.
+ */
+FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Analyze usage to find DDR variables
   // All function parameters should be in DDR (main memory)
   MemRefUsageVisitor visitor(func->params_);
@@ -242,10 +246,9 @@ FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
   std::vector<VarPtr> new_params;
   new_params.reserve(func->params_.size());
   for (const auto& param : func->params_) {
-    // Cast ExprPtr back to VarPtr for GetNewVar
-    auto new_param_expr = mutator.GetNewVar(param);
-    auto new_param = As<Var>(std::static_pointer_cast<const IRNode>(new_param_expr));
-    INTERNAL_CHECK(new_param) << "Failed to cast mutated param to Var";
+    // GetNewVar returns a VarPtr directly
+    auto new_param = mutator.GetNewVar(param);
+    INTERNAL_CHECK(new_param) << "Failed to get new param";
     new_params.push_back(new_param);
   }
 
@@ -256,5 +259,11 @@ FunctionPtr InitMemRefPass::Run(const FunctionPtr& func) {
   return std::make_shared<Function>(func->name_, new_params, func->return_types_, new_body, func->span_);
 }
 
+}  // namespace
+
+// Factory function
+namespace pass {
+Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef"); }
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

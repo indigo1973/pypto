@@ -9,40 +9,35 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_
-#define PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_
-
 #include <memory>
+#include <string>
 
 #include "pypto/ir/function.h"
-#include "pypto/ir/transform/base/pass.h"
+#include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
 namespace ir {
+namespace pass {
 
 /**
- * @brief Pass for inserting synchronization operations (sync_src, sync_dst, bars)
+ * @brief Create an identity pass for testing
  *
- * This pass analyzes data dependencies between operations based on MemRef.
- * It inserts:
- * - sync_src/sync_dst pairs for cross-pipe dependencies
- * - bar_v/bar_m for intra-pipe dependencies in Vector/Cube units
+ * This pass appends "_identity" to each function name for testing purposes.
+ * This allows tests to verify that the pass was actually executed.
  */
-class InsertSyncPass : public Pass {
- public:
-  InsertSyncPass() = default;
-  ~InsertSyncPass() override = default;
+Pass Identity() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) {
+        // Append "_identity" suffix to the function name
+        std::string new_name = func->name_ + "_identity";
 
-  /**
-   * @brief Execute the insert sync pass
-   *
-   * @param func Input function
-   * @return Function with synchronization operations inserted
-   */
-  FunctionPtr Run(const FunctionPtr& func) override;
-};
+        // Create a new function with the modified name
+        return std::make_shared<const Function>(new_name, func->params_, func->return_types_, func->body_,
+                                                func->span_);
+      },
+      "Identity");
+}
 
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto
-
-#endif  // PYPTO_IR_TRANSFORM_INSERT_SYNC_PASS_H_

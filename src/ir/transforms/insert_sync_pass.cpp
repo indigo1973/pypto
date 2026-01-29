@@ -9,8 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/insert_sync_pass.h"
-
 #include <any>
 #include <map>
 #include <memory>
@@ -23,11 +21,15 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/mutator.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 
 namespace pypto {
 namespace ir {
@@ -421,9 +423,9 @@ class SyncInserter : public IRMutator {
     auto create_sync_call = [](const std::string& op_name, PipeType p, PipeType tp, int event_id) {
       auto& registry = OpRegistry::GetInstance();
       std::vector<std::pair<std::string, std::any>> kwargs;
-      kwargs.push_back({"set_pipe", static_cast<int>(p)});
-      kwargs.push_back({"wait_pipe", static_cast<int>(tp)});
-      kwargs.push_back({"event_id", event_id});
+      kwargs.emplace_back("set_pipe", static_cast<int>(p));
+      kwargs.emplace_back("wait_pipe", static_cast<int>(tp));
+      kwargs.emplace_back("event_id", event_id);
       auto call = registry.Create(op_name, {}, kwargs, Span::unknown());
       return std::make_shared<const EvalStmt>(call, Span::unknown());
     };
@@ -522,11 +524,23 @@ class SyncInserter : public IRMutator {
 
 }  // namespace
 
-FunctionPtr InsertSyncPass::Run(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "InsertSyncPass cannot run on null function";
-  SyncInserter inserter;
-  return inserter.Run(func);
+// Factory function
+namespace pass {
+/**
+ * @brief Create an InsertSync pass
+ *
+ * This pass analyzes data dependencies between operations based on MemRef
+ * and inserts synchronization operations (sync_src, sync_dst, bar_v, bar_m)
+ * to ensure correct execution order across different hardware pipes.
+ */
+Pass InsertSync() {
+  return CreateFunctionPass(
+      [](const FunctionPtr& func) {
+        SyncInserter inserter;
+        return inserter.Run(func);
+      },
+      "InsertSync");
 }
-
+}  // namespace pass
 }  // namespace ir
 }  // namespace pypto

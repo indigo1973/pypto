@@ -9,19 +9,18 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/ir/transform/add_alloc_pass.h"
-
 #include <memory>
 #include <set>
+#include <string>
 #include <vector>
 
-#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transform/base/visitor.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -34,7 +33,7 @@ class MemRefCollectorVisitor : public IRVisitor {
  public:
   MemRefCollectorVisitor() = default;
 
-  const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
+  [[nodiscard]] const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
 
   void VisitExpr_(const VarPtr& op) override {
     // Check if this variable has a TileType with MemRef
@@ -66,9 +65,10 @@ class MemRefCollectorVisitor : public IRVisitor {
   }
 };
 
-}  // namespace
-
-void AddAllocPass::CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefPtr>& memrefs) {
+/**
+ * @brief Helper function to collect MemRefs from a statement
+ */
+void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefPtr>& memrefs) {
   // Create a visitor to traverse the statement
   MemRefCollectorVisitor visitor;
   visitor.VisitStmt(stmt);
@@ -87,7 +87,10 @@ void AddAllocPass::CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<
   }
 }
 
-FunctionPtr AddAllocPass::Run(const FunctionPtr& func) {
+/**
+ * @brief Transform a function by adding alloc operations for TileType MemRefs
+ */
+FunctionPtr TransformAddAlloc(const FunctionPtr& func) {
   // Step 1: Collect all unique MemRef objects from TileType variables in the function
   std::vector<MemRefPtr> memrefs;
   CollectMemRefsFromStatement(func->body_, memrefs);
@@ -152,6 +155,13 @@ FunctionPtr AddAllocPass::Run(const FunctionPtr& func) {
   // Step 4: Return transformed function
   return std::make_shared<Function>(func->name_, func->params_, func->return_types_, new_body, func->span_);
 }
+
+}  // namespace
+
+namespace pass {
+// Factory function
+Pass AddAlloc() { return CreateFunctionPass(TransformAddAlloc, "AddAlloc"); }
+}  // namespace pass
 
 }  // namespace ir
 }  // namespace pypto
