@@ -385,6 +385,49 @@ def test_tensor_read_with_expr_indices():
     assert result_type.dtype == DataType.FP16
 
 
+def test_tensor_dim():
+    """Test tensor.dim operation extracts shape dimension as scalar."""
+    span = ir.Span.unknown()
+
+    # Create a 3D tensor [4, 8, 16]
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim8, dim16], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Extract dimension at axis 1
+    call = ir.op.tensor.dim(tensor_var, 1)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.dim"
+
+    # Result should be ScalarType(INT64)
+    result_type = call.type
+    assert isinstance(result_type, ir.ScalarType)
+    assert result_type.dtype == DataType.INT64
+
+
+def test_tensor_dim_negative_axis():
+    """Test tensor.dim with negative axis indexing."""
+    span = ir.Span.unknown()
+
+    # Create a 2D tensor [32, 64]
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim32, dim64], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # Extract last dimension using negative index
+    call = ir.op.tensor.dim(tensor_var, -1)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.dim"
+    result_type = call.type
+    assert isinstance(result_type, ir.ScalarType)
+    assert result_type.dtype == DataType.INT64
+
+
 def test_tensor_create_dynamic_shape():
     """Test tensor.create with dynamic (Expr) shape dimensions."""
     span = ir.Span.unknown()
@@ -414,6 +457,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.cast")
     assert ir.is_op_registered("tensor.assemble")
     assert ir.is_op_registered("tensor.maximum")
+    assert ir.is_op_registered("tensor.dim")
     # Check transform operators
     assert ir.is_op_registered("tensor.reshape")
     assert ir.is_op_registered("tensor.transpose")

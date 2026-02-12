@@ -266,5 +266,41 @@ REGISTER_OP("tensor.assemble")
       return DeduceTensorAssembleType(args, kwargs);
     });
 
+TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.dim: Extract a shape dimension from a tensor as a scalar
+  // Args: (tensor, axis)
+  // Returns: ScalarType(INT64)
+  CHECK(args.size() == 2) << "tensor.dim requires exactly 2 arguments (tensor, axis), but got "
+                          << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.dim requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  auto axis_const = As<ConstInt>(args[1]);
+  CHECK(axis_const) << "tensor.dim requires axis to be a constant integer";
+
+  int64_t axis = axis_const->value_;
+  int64_t rank = static_cast<int64_t>(tensor_type->shape_.size());
+
+  // Support negative indexing
+  if (axis < 0) axis += rank;
+  CHECK(axis >= 0 && axis < rank) << "tensor.dim axis " << axis_const->value_
+                                  << " out of range for tensor of rank " << rank;
+
+  return std::make_shared<ScalarType>(DataType(DataType::INT64));
+}
+
+REGISTER_OP("tensor.dim")
+    .set_op_category("TensorOp")
+    .set_description("Extract a shape dimension from a tensor as a scalar value")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .add_argument("axis", "Dimension index (ConstInt, supports negative indexing)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorDimType(args, kwargs);
+    });
+
 }  // namespace ir
 }  // namespace pypto

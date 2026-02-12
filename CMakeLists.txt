@@ -122,6 +122,9 @@ set(PYPTO_SOURCES
     src/codegen/cce/code_context.cpp
     src/codegen/cce/type_converter.cpp
     src/codegen/cce/cce_codegen.cpp
+    src/codegen/codegen_base.cpp
+    src/codegen/orchestration_op_registry.cpp
+    src/codegen/tensor_op_codegen.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
     src/ir/transforms/add_alloc_pass.cpp
     src/ir/transforms/verify_ssa_pass.cpp

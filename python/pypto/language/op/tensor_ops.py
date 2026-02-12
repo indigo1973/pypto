@@ -18,6 +18,7 @@ from typing import Literal, Optional, Union
 __all__ = [
     "create",
     "read",
+    "dim",
     "view",
     "matmul",
     "mul",
@@ -71,6 +72,21 @@ def read(tensor: Tensor, indices: list[Union[int, Expr]]) -> Scalar:
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.read(tensor_expr, indices)
+    return Scalar(expr=call_expr)
+
+
+def dim(tensor: Tensor, axis: int) -> Scalar:
+    """Extract a shape dimension from a tensor as a scalar value.
+
+    Args:
+        tensor: Input tensor
+        axis: Dimension index (supports negative indexing)
+
+    Returns:
+        Scalar wrapping the dim operation (INT64)
+    """
+    tensor_expr = tensor.unwrap()
+    call_expr = _ir_ops.dim(tensor_expr, axis)
     return Scalar(expr=call_expr)
 
 

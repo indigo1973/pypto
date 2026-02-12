@@ -432,6 +432,19 @@ class TestPromotedOps:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_promoted_dim(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Scalar[pl.INT64]:
+            d: pl.Scalar[pl.INT64] = pl.dim(a, 0)
+            return d
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Scalar[pl.INT64]:
+            d: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)
+            return d
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_promoted_load_store(self):
         @pl.function
         def unified(

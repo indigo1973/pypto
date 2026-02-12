@@ -62,6 +62,23 @@ def read(tensor: Expr, indices: list[Union[int, Expr]], span: Optional[Span] = N
     return _ir_core.create_op_call("tensor.read", args, {}, actual_span)
 
 
+def dim(tensor: Expr, axis: Union[int, Expr], span: Optional[Span] = None) -> Call:
+    """Extract a shape dimension from a tensor as a scalar value.
+
+    Args:
+        tensor: Input tensor expression
+        axis: Dimension index (supports negative indexing)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the dimension size as ScalarType(INT64)
+    """
+    actual_span = _get_span_or_capture(span)
+    axis_expr = _normalize_expr(axis, actual_span, int_dtype=DataType.INT64)
+    args = [tensor, axis_expr]
+    return _ir_core.create_op_call("tensor.dim", args, {}, actual_span)
+
+
 def view(
     tensor: Expr, shape: list[Union[int, Expr]], offset: list[Union[int, Expr]], span: Optional[Span] = None
 ) -> Call:

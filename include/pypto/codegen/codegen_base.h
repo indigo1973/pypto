@@ -89,6 +89,27 @@ class CodegenBase : public ir::IRVisitor {
    */
   virtual std::string GetVarName(const ir::VarPtr& var) = 0;
 
+  /**
+   * @brief Try to extract variable name from expression
+   *
+   * Supports Var and IterArg expressions. Returns empty string if not a variable.
+   *
+   * @param expr Expression to extract name from
+   * @return Variable name or empty string
+   */
+  static std::string TryGetVarName(const ir::ExprPtr& expr);
+
+  /**
+   * @brief Generate C++ code string for an IR expression
+   *
+   * Converts IR expressions to C++ code strings for inline operations.
+   * Supports variables, constants, binary operations, and tuple access.
+   *
+   * @param expr Expression to convert
+   * @return C++ code string
+   */
+  static std::string GenerateExprString(const ir::ExprPtr& expr);
+
  protected:
   /**
    * @brief Throw when no codegen is registered for a Call

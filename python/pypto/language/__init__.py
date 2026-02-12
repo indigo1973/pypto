@@ -75,7 +75,7 @@ from .op.block_ops import (
     store,
     sum,
 )
-from .op.tensor_ops import assemble, create
+from .op.tensor_ops import assemble, create, dim
 from .op.unified_ops import (
     add,
     cast,
@@ -178,6 +178,7 @@ __all__ = [
     # Promoted tensor-only
     "create",
     "assemble",
+    "dim",
     "FunctionType",
     "ForKind",
     "FP4",

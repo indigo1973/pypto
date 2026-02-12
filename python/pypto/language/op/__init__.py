@@ -56,7 +56,7 @@ from .block_ops import (
 )
 
 # Promoted tensor-only ops (accessible as pl.create, etc.)
-from .tensor_ops import assemble, create
+from .tensor_ops import assemble, create, dim
 
 # Unified dispatch (overlapping ops)
 from .unified_ops import (
@@ -126,4 +126,5 @@ __all__ = [
     # Promoted tensor-only
     "create",
     "assemble",
+    "dim",
 ]
