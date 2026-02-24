@@ -1,0 +1,1407 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "entry_id": "BuildExampleGraph",
+    "name": "ExampleOrchProgram",
+    "description": "Visual IR for program ExampleOrchProgram"
+  },
+  "graphs": [
+    {
+      "id": "BuildExampleGraph",
+      "nodes": [
+        {
+          "id": 0,
+          "name": "a",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 70
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 70
+          }
+        },
+        {
+          "id": 1,
+          "name": "b",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 71
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 71
+          }
+        },
+        {
+          "id": 2,
+          "name": "c",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 77
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 77
+          }
+        },
+        {
+          "id": 3,
+          "name": "kernel_add",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              0,
+              1
+            ],
+            "outputs": [
+              2
+            ],
+            "subgraph_id": "kernel_add",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 77
+          },
+          "details": {
+            "inputs": [
+              0,
+              1
+            ],
+            "outputs": [
+              2
+            ],
+            "subgraph_id": "kernel_add",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 77
+          }
+        },
+        {
+          "id": 4,
+          "name": "d",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          }
+        },
+        {
+          "id": 5,
+          "name": "const_1.0",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "value": 1.0,
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          },
+          "details": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "value": 1.0,
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          }
+        },
+        {
+          "id": 6,
+          "name": "kernel_add_scalar",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              2,
+              5
+            ],
+            "outputs": [
+              4
+            ],
+            "subgraph_id": "kernel_add_scalar",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          },
+          "details": {
+            "inputs": [
+              2,
+              5
+            ],
+            "outputs": [
+              4
+            ],
+            "subgraph_id": "kernel_add_scalar",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 78
+          }
+        },
+        {
+          "id": 7,
+          "name": "e",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          }
+        },
+        {
+          "id": 8,
+          "name": "const_2.0",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "value": 2.0,
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          },
+          "details": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "value": 2.0,
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          }
+        },
+        {
+          "id": 9,
+          "name": "kernel_add_scalar",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              2,
+              8
+            ],
+            "outputs": [
+              7
+            ],
+            "subgraph_id": "kernel_add_scalar",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          },
+          "details": {
+            "inputs": [
+              2,
+              8
+            ],
+            "outputs": [
+              7
+            ],
+            "subgraph_id": "kernel_add_scalar",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 79
+          }
+        },
+        {
+          "id": 10,
+          "name": "f_result",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 80
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 80
+          }
+        },
+        {
+          "id": 11,
+          "name": "kernel_mul",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              4,
+              7
+            ],
+            "outputs": [
+              10
+            ],
+            "subgraph_id": "kernel_mul",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 80
+          },
+          "details": {
+            "inputs": [
+              4,
+              7
+            ],
+            "outputs": [
+              10
+            ],
+            "subgraph_id": "kernel_mul",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 80
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": 0,
+          "source_id": 0,
+          "target_id": 3
+        },
+        {
+          "id": 1,
+          "source_id": 1,
+          "target_id": 3
+        },
+        {
+          "id": 2,
+          "source_id": 3,
+          "target_id": 2
+        },
+        {
+          "id": 3,
+          "source_id": 2,
+          "target_id": 6
+        },
+        {
+          "id": 4,
+          "source_id": 5,
+          "target_id": 6
+        },
+        {
+          "id": 5,
+          "source_id": 6,
+          "target_id": 4
+        },
+        {
+          "id": 6,
+          "source_id": 2,
+          "target_id": 9
+        },
+        {
+          "id": 7,
+          "source_id": 8,
+          "target_id": 9
+        },
+        {
+          "id": 8,
+          "source_id": 9,
+          "target_id": 7
+        },
+        {
+          "id": 9,
+          "source_id": 4,
+          "target_id": 11
+        },
+        {
+          "id": 10,
+          "source_id": 7,
+          "target_id": 11
+        },
+        {
+          "id": 11,
+          "source_id": 11,
+          "target_id": 10
+        }
+      ]
+    },
+    {
+      "id": "kernel_add",
+      "nodes": [
+        {
+          "id": 12,
+          "name": "a",
+          "role": "INCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 29
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 29
+          }
+        },
+        {
+          "id": 13,
+          "name": "b",
+          "role": "INCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 30
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 30
+          }
+        },
+        {
+          "id": 14,
+          "name": "a_tile",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 34
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 34
+          }
+        },
+        {
+          "id": 15,
+          "name": "block.load",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              12
+            ],
+            "outputs": [
+              14
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 34,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          },
+          "details": {
+            "inputs": [
+              12
+            ],
+            "outputs": [
+              14
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 34,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          }
+        },
+        {
+          "id": 16,
+          "name": "b_tile",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 35
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 35
+          }
+        },
+        {
+          "id": 17,
+          "name": "block.load",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              13
+            ],
+            "outputs": [
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 35,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          },
+          "details": {
+            "inputs": [
+              13
+            ],
+            "outputs": [
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 35,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          }
+        },
+        {
+          "id": 18,
+          "name": "result",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 36
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 36
+          }
+        },
+        {
+          "id": 19,
+          "name": "block.add",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              14,
+              16
+            ],
+            "outputs": [
+              18
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 36
+          },
+          "details": {
+            "inputs": [
+              14,
+              16
+            ],
+            "outputs": [
+              18
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 36
+          }
+        },
+        {
+          "id": 20,
+          "name": "output_new",
+          "role": "OUTCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 37
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 37
+          }
+        },
+        {
+          "id": 21,
+          "name": "block.store",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              18
+            ],
+            "outputs": [
+              20
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 37,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          },
+          "details": {
+            "inputs": [
+              18
+            ],
+            "outputs": [
+              20
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 37,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": 12,
+          "source_id": 12,
+          "target_id": 15
+        },
+        {
+          "id": 13,
+          "source_id": 15,
+          "target_id": 14
+        },
+        {
+          "id": 14,
+          "source_id": 13,
+          "target_id": 17
+        },
+        {
+          "id": 15,
+          "source_id": 17,
+          "target_id": 16
+        },
+        {
+          "id": 16,
+          "source_id": 14,
+          "target_id": 19
+        },
+        {
+          "id": 17,
+          "source_id": 16,
+          "target_id": 19
+        },
+        {
+          "id": 18,
+          "source_id": 19,
+          "target_id": 18
+        },
+        {
+          "id": 19,
+          "source_id": 18,
+          "target_id": 21
+        },
+        {
+          "id": 20,
+          "source_id": 21,
+          "target_id": 20
+        }
+      ]
+    },
+    {
+      "id": "kernel_add_scalar",
+      "nodes": [
+        {
+          "id": 22,
+          "name": "a",
+          "role": "INCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 43
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 43
+          }
+        },
+        {
+          "id": 23,
+          "name": "scalar",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 44
+          },
+          "details": {
+            "data_kind": "scalar",
+            "data_type": "fp32",
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 44
+          }
+        },
+        {
+          "id": 24,
+          "name": "x",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 48
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 48
+          }
+        },
+        {
+          "id": 25,
+          "name": "block.load",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              22
+            ],
+            "outputs": [
+              24
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 48,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          },
+          "details": {
+            "inputs": [
+              22
+            ],
+            "outputs": [
+              24
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 48,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          }
+        },
+        {
+          "id": 26,
+          "name": "result",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 49
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 49
+          }
+        },
+        {
+          "id": 27,
+          "name": "block.adds",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              24,
+              23
+            ],
+            "outputs": [
+              26
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 49
+          },
+          "details": {
+            "inputs": [
+              24,
+              23
+            ],
+            "outputs": [
+              26
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 49
+          }
+        },
+        {
+          "id": 28,
+          "name": "output_new",
+          "role": "OUTCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 50
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 50
+          }
+        },
+        {
+          "id": 29,
+          "name": "block.store",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              26
+            ],
+            "outputs": [
+              28
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 50,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          },
+          "details": {
+            "inputs": [
+              26
+            ],
+            "outputs": [
+              28
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 50,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": 21,
+          "source_id": 22,
+          "target_id": 25
+        },
+        {
+          "id": 22,
+          "source_id": 25,
+          "target_id": 24
+        },
+        {
+          "id": 23,
+          "source_id": 24,
+          "target_id": 27
+        },
+        {
+          "id": 24,
+          "source_id": 23,
+          "target_id": 27
+        },
+        {
+          "id": 25,
+          "source_id": 27,
+          "target_id": 26
+        },
+        {
+          "id": 26,
+          "source_id": 26,
+          "target_id": 29
+        },
+        {
+          "id": 27,
+          "source_id": 29,
+          "target_id": 28
+        }
+      ]
+    },
+    {
+      "id": "kernel_mul",
+      "nodes": [
+        {
+          "id": 30,
+          "name": "a",
+          "role": "INCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 56
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 56
+          }
+        },
+        {
+          "id": 31,
+          "name": "b",
+          "role": "INCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 57
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 57
+          }
+        },
+        {
+          "id": 32,
+          "name": "a_tile",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 61
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 61
+          }
+        },
+        {
+          "id": 33,
+          "name": "block.load",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              30
+            ],
+            "outputs": [
+              32
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 61,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          },
+          "details": {
+            "inputs": [
+              30
+            ],
+            "outputs": [
+              32
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 61,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          }
+        },
+        {
+          "id": 34,
+          "name": "b_tile",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 62
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 62
+          }
+        },
+        {
+          "id": 35,
+          "name": "block.load",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              31
+            ],
+            "outputs": [
+              34
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 62,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          },
+          "details": {
+            "inputs": [
+              31
+            ],
+            "outputs": [
+              34
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 62,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ]
+          }
+        },
+        {
+          "id": 36,
+          "name": "result",
+          "role": "DATA",
+          "attributes": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 63
+          },
+          "details": {
+            "data_kind": "tile",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 63
+          }
+        },
+        {
+          "id": 37,
+          "name": "block.mul",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              32,
+              34
+            ],
+            "outputs": [
+              36
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 63
+          },
+          "details": {
+            "inputs": [
+              32,
+              34
+            ],
+            "outputs": [
+              36
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 63
+          }
+        },
+        {
+          "id": 38,
+          "name": "output_new",
+          "role": "OUTCAST",
+          "attributes": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 64
+          },
+          "details": {
+            "data_kind": "tensor",
+            "data_type": "fp32",
+            "shape": [
+              16,
+              16
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 64
+          }
+        },
+        {
+          "id": 39,
+          "name": "block.store",
+          "role": "OP",
+          "attributes": {
+            "inputs": [
+              36
+            ],
+            "outputs": [
+              38
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 64,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          },
+          "details": {
+            "inputs": [
+              36
+            ],
+            "outputs": [
+              38
+            ],
+            "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
+            "span_line": 64,
+            "offset": [
+              0,
+              0
+            ],
+            "shape": [
+              16,
+              16
+            ],
+            "destination": "output",
+            "destination_type": {
+              "data_kind": "tensor",
+              "data_type": "fp32",
+              "shape": [
+                16,
+                16
+              ]
+            }
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": 28,
+          "source_id": 30,
+          "target_id": 33
+        },
+        {
+          "id": 29,
+          "source_id": 33,
+          "target_id": 32
+        },
+        {
+          "id": 30,
+          "source_id": 31,
+          "target_id": 35
+        },
+        {
+          "id": 31,
+          "source_id": 35,
+          "target_id": 34
+        },
+        {
+          "id": 32,
+          "source_id": 32,
+          "target_id": 37
+        },
+        {
+          "id": 33,
+          "source_id": 34,
+          "target_id": 37
+        },
+        {
+          "id": 34,
+          "source_id": 37,
+          "target_id": 36
+        },
+        {
+          "id": 35,
+          "source_id": 36,
+          "target_id": 39
+        },
+        {
+          "id": 36,
+          "source_id": 39,
+          "target_id": 38
+        }
+      ]
+    }
+  ]
+}

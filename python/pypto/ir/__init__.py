@@ -41,6 +41,9 @@ from .printer import python_print
 # This patches the native TensorType and TileType classes to accept integer shapes
 from .type import TensorType, TileType
 
+# Import Visual IR exporter
+from .visual_ir_exporter import VisualIRExporter, export_to_visual_ir
+
 # Export common DataType values for convenience
 FP4 = DataType.FP4
 FP8E4M3FN = DataType.FP8E4M3FN
@@ -72,4 +75,6 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
+    "VisualIRExporter",
+    "export_to_visual_ir",
 ]  # fmt: skip
