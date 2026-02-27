@@ -111,8 +111,6 @@ def main():
     # Step 1: Build IR
     print("\n[1] Building IR...")
     program = ExampleOrchProgram
-    import pdb
-    pdb.set_trace()
     print("✓ IR construction complete")
     print(f"  Functions: {[f.name for f in program.functions.values()]}")
 

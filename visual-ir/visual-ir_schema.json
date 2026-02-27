@@ -58,8 +58,8 @@
                 },
                 "role": {
                   "type": "string",
-                  "enum": ["DATA", "OP", "INCAST", "OUTCAST", "DEFAULT"],
-                  "description": "节点角色（必需），function的输入参数对应INCAST，function的返回输出为OUTCAST"
+                  "enum": ["DATA", "OP", "DEFAULT"],
+                  "description": "节点角色（必需）：DATA-数据节点，OP-操作节点，DEFAULT-默认角色"
                 },
                 "attributes": {
                   "type": "object",
@@ -74,6 +74,11 @@
                       "type": "string",
                       "enum": ["tensor", "scalar", "tile", "others"],
                       "description": "数据节点数据种类（可选）"
+                    },
+                    "data_mode": {
+                      "type": "string",
+                      "enum": ["INCAST", "OUTCAST", "DEFAULT"],
+                      "description": "数据节点数据模式（可选）：INCAST-通过 block.load 等数据搬移操作加载的输入参数，OUTCAST-通过 block.store 等数据搬移操作输出的返回值，DEFAULT-默认状态"
                     },
                     "data_type": {
                       "type": "string",
@@ -117,8 +122,35 @@
                       "description": "节点对应的源代码开始行数（可选）"
                     },
                     "subgraph_id": {
-                      "type": "integer",
-                      "description": "操作节点对应的子图ID（可选）"
+                      "type": "string",
+                      "description": "操作节点对应的子图ID（可选），使用 function name"
+                    },
+                    "offset": {
+                      "type": "array",
+                      "description": "操作节点的偏移量数组（可选），如 block.load/store 的 offset 参数",
+                      "items": {}
+                    },
+                    "destination": {
+                      "type": "string",
+                      "description": "操作节点的目标参数名称（可选），如 block.store 的目标张量名"
+                    },
+                    "destination_type": {
+                      "type": "object",
+                      "description": "操作节点的目标参数类型信息（可选），包含 data_kind, data_type, shape",
+                      "properties": {
+                        "data_kind": {
+                          "type": "string",
+                          "enum": ["tensor", "scalar", "tile", "others"]
+                        },
+                        "data_type": {
+                          "type": "string"
+                        },
+                        "shape": {
+                          "type": "array",
+                          "items": {}
+                        }
+                      },
+                      "additionalProperties": true
                     }
                   },
                   "additionalProperties": true

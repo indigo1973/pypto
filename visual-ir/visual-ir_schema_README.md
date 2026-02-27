@@ -23,9 +23,7 @@ Visual IR JSON 文件的完整层级结构如下：
         │   └── node (object)
         │       ├── id (integer, 必需) - 节点ID
         │       ├── name (string, 必需) - 节点名称
-        │       ├── role (enum, 必需) - 节点角色: "DATA" | "OP" | "INCAST" | "OUTCAST" | "DEFAULT"
-        │       │   - INCAST: 通过 block.load 等数据搬移操作加载的输入参数
-        │       │   - OUTCAST: 通过 block.store 等数据搬移操作输出的返回值
+        │       ├── role (enum, 必需) - 节点角色: "DATA" | "OP" | "DEFAULT"
         │       │   - DATA: 不涉及数据搬移的普通数据节点
         │       │   - OP: 操作节点
         │       │   - DEFAULT: 默认角色
@@ -34,6 +32,10 @@ Visual IR JSON 文件的完整层级结构如下：
         │       │   └── ... (支持自定义扩展属性)
         │       └── detalils (object, 可选) - 详细的节点属性，支持自定义扩展
         │           ├── data_kind (enum, 可选) - 数据节点数据种类: "tensor" | "scalar" | "tile" | "others"
+        │           ├── data_mode (enum, 可选) - 数据节点状态方式： "INCAST" | "OUTCAST" | "DEFAULT"
+        │           │   - INCAST: 通过 block.load 等数据搬移操作加载的输入参数
+        │           │   - OUTCAST: 通过 block.store 等数据搬移操作输出的返回值
+        │           │   - DEFAULT: 默认状态
         │           ├── data_type (string, 可选) - 数据节点数据类型，如 "float16", "int8" 等
         │           ├── layout (string, 可选) - 数据节点数据格式/布局，如 "NZ", "ND", "FRACTAL_Z" 等
         │           ├── shape (array, 可选) - 数据节点数据形状数组，元素类型: number | string (scalar符号表达式，如 "%d", "%batch") | null

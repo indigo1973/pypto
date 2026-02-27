@@ -325,7 +325,10 @@ class VisualIRExporter:
         for node in nodes:
             node_name = node.get("name", "")
             if any(var.name == node_name for var in return_vars):
-                node["role"] = "OUTCAST"
+                node["role"] = "DATA"
+                node["details"]["data_mode"] = "OUTCAST"
+                # Re-apply attributes_filter so OUTCAST is consistent with other nodes
+                node["attributes"] = self._filter_attributes(node["details"])
 
     def _find_return_vars(self, stmt: _ir.Stmt) -> list[_ir.Var]:
         """Find variables returned by the function.
@@ -369,7 +372,8 @@ class VisualIRExporter:
 
         Args:
             var: The Var node
-            role: Node role (DATA, OP, INCAST, OUTCAST, DEFAULT)
+            role: Internal role hint. "INCAST" and "OUTCAST" are mapped to
+                  role="DATA" with a corresponding data_mode in details.
 
         Returns:
             Node dictionary
@@ -378,13 +382,25 @@ class VisualIRExporter:
         self.node_id_counter += 1
         self.node_map[id(var)] = node_id
 
+        # Map INCAST/OUTCAST internal roles to role=DATA + data_mode
+        visual_role = role
+        data_mode: Optional[str] = None
+        if role == "INCAST":
+            visual_role = "DATA"
+            data_mode = "INCAST"
+        elif role == "OUTCAST":
+            visual_role = "DATA"
+            data_mode = "OUTCAST"
+
         details = self._extract_details_from_var(var)
+        if data_mode is not None:
+            details["data_mode"] = data_mode
         attributes = self._filter_attributes(details)
 
         return {
             "id": node_id,
             "name": var.name,
-            "role": role,
+            "role": visual_role,
             "attributes": attributes,
             "details": details,
         }

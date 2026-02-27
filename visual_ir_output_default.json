@@ -383,7 +383,7 @@
         {
           "id": 12,
           "name": "a",
-          "role": "INCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -392,7 +392,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 29
+            "span_line": 29,
+            "data_mode": "INCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -402,13 +403,14 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 29
+            "span_line": 29,
+            "data_mode": "INCAST"
           }
         },
         {
           "id": 13,
           "name": "b",
-          "role": "INCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -417,7 +419,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 30
+            "span_line": 30,
+            "data_mode": "INCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -427,7 +430,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 30
+            "span_line": 30,
+            "data_mode": "INCAST"
           }
         },
         {
@@ -617,7 +621,7 @@
         {
           "id": 20,
           "name": "output_new",
-          "role": "OUTCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -626,7 +630,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 37
+            "span_line": 37,
+            "data_mode": "OUTCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -636,7 +641,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 37
+            "span_line": 37,
+            "data_mode": "OUTCAST"
           }
         },
         {
@@ -753,7 +759,7 @@
         {
           "id": 22,
           "name": "a",
-          "role": "INCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -762,7 +768,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 43
+            "span_line": 43,
+            "data_mode": "INCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -772,7 +779,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 43
+            "span_line": 43,
+            "data_mode": "INCAST"
           }
         },
         {
@@ -913,7 +921,7 @@
         {
           "id": 28,
           "name": "output_new",
-          "role": "OUTCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -922,7 +930,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 50
+            "span_line": 50,
+            "data_mode": "OUTCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -932,7 +941,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 50
+            "span_line": 50,
+            "data_mode": "OUTCAST"
           }
         },
         {
@@ -1039,7 +1049,7 @@
         {
           "id": 30,
           "name": "a",
-          "role": "INCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -1048,7 +1058,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 56
+            "span_line": 56,
+            "data_mode": "INCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -1058,13 +1069,14 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 56
+            "span_line": 56,
+            "data_mode": "INCAST"
           }
         },
         {
           "id": 31,
           "name": "b",
-          "role": "INCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -1073,7 +1085,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 57
+            "span_line": 57,
+            "data_mode": "INCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -1083,7 +1096,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 57
+            "span_line": 57,
+            "data_mode": "INCAST"
           }
         },
         {
@@ -1273,7 +1287,7 @@
         {
           "id": 38,
           "name": "output_new",
-          "role": "OUTCAST",
+          "role": "DATA",
           "attributes": {
             "data_kind": "tensor",
             "data_type": "fp32",
@@ -1282,7 +1296,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 64
+            "span_line": 64,
+            "data_mode": "OUTCAST"
           },
           "details": {
             "data_kind": "tensor",
@@ -1292,7 +1307,8 @@
               16
             ],
             "span_file": "/data/w00949750/wzh_pypto_github/pypto/examples/ir_parser/orchestration_example_with_visual_ir.py",
-            "span_line": 64
+            "span_line": 64,
+            "data_mode": "OUTCAST"
           }
         },
         {
