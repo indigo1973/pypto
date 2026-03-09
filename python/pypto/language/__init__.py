@@ -122,12 +122,14 @@ from .op.unified_ops import (
     matmul,
     maximum,
     mul,
+    read,
     reshape,
     row_max,
     row_sum,
     slice,
     sub,
     transpose,
+    write,
 )
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
@@ -205,6 +207,8 @@ __all__ = [
     "matmul",
     "row_max",
     "row_sum",
+    "read",
+    "write",
     # Promoted tile-only
     "create_tile",
     "load",
