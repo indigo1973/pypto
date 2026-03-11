@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 
 
 class TestConvertTensorToTileOps:
@@ -650,6 +650,27 @@ class TestNestedControlFlow:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_missing_conversion_raises_error(self):
+        """TensorOp with no registered converter raises an error when encountered in InCore body."""
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([4], DataType.FP32)
+
+        x_param = ir.Var("x", tensor_type, span)
+        call = ir.create_op_call("test.tensor_op_no_conv", [x_param], {}, span)
+        y_var = ir.Var("y", tensor_type, span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(y_var, call, span),
+                ir.ReturnStmt([y_var], span),
+            ],
+            span,
+        )
+        func = ir.Function("incore", [x_param], [tensor_type], body, span, ir.FunctionType.InCore)
+        prog = ir.Program([func], "test_program", span)
+
+        with pytest.raises(Exception, match="has no registered tile conversion"):
+            passes.convert_tensor_to_tile_ops()(prog)
+
 
 class TestGmLocalTensorConversion:
     """Test gm_tensor vs local_tensor differentiated conversion."""
@@ -825,6 +846,94 @@ class TestGmLocalTensorConversion:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.FP32]:
                 v: pl.Scalar[pl.FP32] = self.main_incore_0(x)
+                return v
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_gm_tensor_write_stays_tensor_write(self):
+        """tensor.write to a gm_tensor (function parameter) stays as tensor.write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[4], pl.FP32],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                pl.tensor.write(dst, [0], val)
+                return val
+
+            @pl.function
+            def main(
+                self,
+                dst: pl.Tensor[[4], pl.FP32],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[4], pl.FP32],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                pl.tensor.write(dst, [0], val)
+                return val
+
+            @pl.function
+            def main(
+                self,
+                dst: pl.Tensor[[4], pl.FP32],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_local_tensor_write_to_tile_write(self):
+        """tensor.write to a local_tensor (result of tensor.add) converts to tile.write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Scalar[pl.FP32]:
+                t: pl.Tensor[[4], pl.FP32] = pl.add(a, b)
+                val: pl.Scalar[pl.FP32] = pl.tensor.read(a, [0])
+                pl.tensor.write(t, [0], val)
+                v: pl.Scalar[pl.FP32] = pl.tensor.read(t, [0])
+                return v
+
+            @pl.function
+            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                v: pl.Scalar[pl.FP32] = self.main_incore_0(a, b)
+                return v
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]
+            ) -> pl.Scalar[pl.FP32]:
+                a_tile: pl.Tile[[4], pl.FP32] = pl.load(a, [0], [4])
+                b_tile: pl.Tile[[4], pl.FP32] = pl.load(b, [0], [4])
+                t_tile: pl.Tile[[4], pl.FP32] = pl.tile.add(a_tile, b_tile)
+                val: pl.Scalar[pl.FP32] = pl.tile.read(a_tile, [0])
+                pl.tile.write(t_tile, [0], val)
+                v: pl.Scalar[pl.FP32] = pl.tile.read(t_tile, [0])
+                return v
+
+            @pl.function
+            def main(self, a: pl.Tensor[[4], pl.FP32], b: pl.Tensor[[4], pl.FP32]) -> pl.Scalar[pl.FP32]:
+                v: pl.Scalar[pl.FP32] = self.main_incore_0(a, b)
                 return v
 
         After = passes.convert_tensor_to_tile_ops()(Before)

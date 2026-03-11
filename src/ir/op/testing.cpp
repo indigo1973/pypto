@@ -46,5 +46,15 @@ REGISTER_OP("test.op")
       return args[0]->GetType();
     });
 
+// Used exclusively to test the "missing conversion" error path in ConvertTensorToTileOps.
+REGISTER_OP("test.tensor_op_no_conv")
+    .set_op_category("TensorOp")
+    .set_description("Test-only op: TensorOp with no registered tile conversion")
+    .add_argument("x", "Input tensor")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return args[0]->GetType();
+    });
+
 }  // namespace ir
 }  // namespace pypto

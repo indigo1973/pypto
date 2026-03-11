@@ -529,8 +529,36 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     // AssignStmt: convert tensor ops to tile ops
     auto assign = As<AssignStmt>(stmt);
     if (!assign) {
-      // Non-assign, non-control-flow statements pass through
-      result.push_back(stmt);
+      // EvalStmt: apply op conversion and var substitution (same logic as AssignStmt path)
+      auto eval_stmt = As<EvalStmt>(stmt);
+      if (eval_stmt) {
+        auto call = As<Call>(eval_stmt->expr_);
+        if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+          const auto* converter = conv_registry.Lookup(call->op_->name_);
+          if (converter) {
+            std::vector<ExprPtr> substituted_args;
+            substituted_args.reserve(call->args_.size());
+            for (const auto& arg : call->args_) {
+              substituted_args.push_back(SubstituteExpr(arg, tensor_to_tile));
+            }
+            auto conv_result = (*converter)(substituted_args, call->kwargs_, call->span_);
+            auto transformed_prologue = TransformIncoreBody(conv_result.prologue, tensor_to_tile, sliced_vars,
+                                                            conv_registry, op_registry, span);
+            for (const auto& prologue_stmt : transformed_prologue) {
+              result.push_back(prologue_stmt);
+            }
+            result.push_back(std::make_shared<EvalStmt>(conv_result.result, eval_stmt->span_));
+            continue;
+          }
+        }
+        // No converter (or non-call): substitute renamed vars in args
+        auto new_expr = SubstituteExpr(eval_stmt->expr_, tensor_to_tile);
+        result.push_back(new_expr != eval_stmt->expr_ ? std::make_shared<EvalStmt>(new_expr, eval_stmt->span_)
+                                                      : stmt);
+      } else {
+        // Non-assign, non-EvalStmt statements pass through unchanged
+        result.push_back(stmt);
+      }
       continue;
     }
 
@@ -564,6 +592,17 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     const auto* converter = conv_registry.Lookup(call->op_->name_);
     if (!converter) {
+      // TensorOps must always have a registered conversion, except for ops that are
+      // handled directly by backend codegen and never need conversion in InCore bodies.
+      if (op_registry.IsRegistered(call->op_->name_)) {
+        const auto& entry = op_registry.GetEntry(call->op_->name_);
+        static const std::unordered_set<std::string> kPassthroughTensorOps = {
+            "tensor.dim",  // queries gm_tensor dimensions; backend codegen handles it directly
+        };
+        INTERNAL_CHECK(entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_))
+            << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
+            << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
+      }
       LOG_WARN << "[ConvertTensorToBlockOps] No converter for op: " << call->op_->name_;
       auto new_value = SubstituteExpr(assign->value_, tensor_to_tile);
       if (new_value != assign->value_) {
@@ -1172,11 +1211,12 @@ class IncoreTileOpsVerifier : public IRVisitor {
     const auto& entry = op_registry.GetEntry(call->op_->name_);
     if (entry.GetOpCategory() == "TensorOp" &&
         OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
-      // tensor.read on a gm_tensor (TensorType input) intentionally stays unconverted
-      if (call->op_->name_ == "tensor.read" && !call->args_.empty() &&
+      // tensor.read/tensor.write on a gm_tensor (TensorType input) intentionally stays unconverted
+      if ((call->op_->name_ == "tensor.read" || call->op_->name_ == "tensor.write") && !call->args_.empty() &&
           As<TensorType>(call->args_[0]->GetType())) {
         return;
       }
+
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "IncoreTileOps", 0,
           "Tensor op '" + call->op_->name_ + "' found in InCore function (should have been converted)", span);

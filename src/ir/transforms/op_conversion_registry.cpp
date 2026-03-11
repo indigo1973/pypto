@@ -466,6 +466,40 @@ OpConversionRegistry::OpConversionRegistry() {
         CHECK(false) << "tensor.read conversion: unexpected input type: " << input->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
+
+  // ────────────────────────────────────────────────────────────────────────
+  //
+  // gm_tensor.write(tensor, indices, value) stays as tensor.write (no conversion)
+  // local_tensor.write(tile, indices, value) → tile.write(tile, indices, value)
+  // ────────────────────────────────────────────────────────────────────────
+
+  RegisterCustom(
+      "tensor.write",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "tensor.write conversion expects 3 args (tensor, indices, value)";
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& dest = args[0];
+
+        if (As<TensorType>(dest->GetType())) {
+          // gm_tensor: keep as tensor.write
+          if (kwargs.empty()) {
+            return ConversionResult{op_reg.Create("tensor.write", args, span)};
+          }
+          return ConversionResult{op_reg.Create("tensor.write", args, kwargs, span)};
+        }
+
+        if (As<TileType>(dest->GetType())) {
+          // local_tensor (now tile): convert to tile.write
+          if (kwargs.empty()) {
+            return ConversionResult{op_reg.Create("tile.write", args, span)};
+          }
+          return ConversionResult{op_reg.Create("tile.write", args, kwargs, span)};
+        }
+
+        CHECK(false) << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
+        return ConversionResult{nullptr};  // unreachable
+      });
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op) {
