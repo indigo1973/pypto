@@ -73,6 +73,8 @@ class RunConfig:
             ``build_output/<program_name>_<timestamp>``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
+        enable_profiling: If ``True``, enable runtime profiling and generate
+            ``swimlane.json`` after execution.
     """
 
     __test__ = False  # Not a pytest test class
@@ -87,6 +89,7 @@ class RunConfig:
     save_kernels: bool = False
     save_kernels_dir: str | None = None
     codegen_only: bool = False
+    enable_profiling: bool = False
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -230,7 +233,8 @@ def run(
         write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
 
         # 4. Execute via Simpler's CodeRunner
-        _execute_on_device(work_dir, golden_path, config.platform, config.device_id)
+        _execute_on_device(work_dir, golden_path, config.platform, config.device_id,
+                           config.enable_profiling)
 
         return RunResult(passed=True, execution_time=time.time() - start_time)
 
@@ -247,7 +251,13 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_id: int) -> None:
+def _execute_on_device(
+    work_dir: Path,
+    golden_path: Path,
+    platform: str,
+    device_id: int,
+    enable_profiling: bool = False,
+) -> None:
     """Invoke Simpler's CodeRunner to compile, load, execute, and validate.
 
     Automatically adds SIMPLER_ROOT sub-paths to ``sys.path`` when the
@@ -260,6 +270,8 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
         platform: Target execution platform (``"a2a3sim"``, ``"a2a3"``,
             ``"a5sim"``, or ``"a5"``).
         device_id: Hardware device index.
+        enable_profiling: If ``True``, enable runtime profiling and generate
+            ``swimlane.json`` after execution.
     """
     simpler_root = os.environ.get("SIMPLER_ROOT")
     if simpler_root:
@@ -270,14 +282,116 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
 
     from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415,I001 — available after sys.path setup
 
+    # Snapshot existing device logs before run so we can identify the new one
+    # (CANN writes device logs asynchronously after execution).
+    pre_run_logs: set[Path] = set()
+    device_log_dir: Path | None = None
+    if enable_profiling:
+        device_log_dir = _get_device_log_dir(device_id)
+        if device_log_dir.exists():
+            pre_run_logs = set(device_log_dir.glob("*.log"))
+
     CodeRunner(
         kernels_dir=str(work_dir),
         golden_path=str(golden_path),
         platform=platform,
         device_id=device_id,
         clone_protocol="https",
+        enable_profiling=enable_profiling,
     ).run()
 
+    if enable_profiling:
+        _generate_swimlane(work_dir, device_id, device_log_dir, pre_run_logs, simpler_root)
+
+
+def _get_device_log_dir(device_id: int) -> Path:
+    """Return the CANN device log directory for *device_id*."""
+    ascend_work_path = os.environ.get("ASCEND_WORK_PATH")
+    if ascend_work_path:
+        root = Path(ascend_work_path).expanduser() / "log" / "debug"
+        if root.exists():
+            return root / f"device-{device_id}"
+    return Path.home() / "ascend" / "log" / "debug" / f"device-{device_id}"
+
+
+def _wait_for_new_device_log(
+    log_dir: Path, pre_run_logs: set[Path], timeout: float = 15, interval: float = 0.5
+) -> Path | None:
+    """Wait for a new ``*.log`` file in *log_dir* that wasn't present before the run.
+
+    CANN dlog writes device logs asynchronously, so the file may appear
+    a few seconds after execution completes.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if log_dir.exists():
+            new_logs = set(log_dir.glob("*.log")) - pre_run_logs
+            if new_logs:
+                return max(new_logs, key=lambda p: p.stat().st_mtime)
+        time.sleep(interval)
+    return None
+
+
+def _generate_swimlane(
+    work_dir: Path,
+    device_id: int,
+    device_log_dir: Path | None,
+    pre_run_logs: set[Path],
+    simpler_root: str | None,
+) -> None:
+    """Run Simpler's swimlane_converter.py to generate ``merged_swimlane_*.json``.
+
+    Output is written to ``<project_root>/outputs/`` and named
+    ``merged_swimlane_<timestamp>.json``.  Failures are logged as warnings so
+    they do not cause the test to fail.
+
+    Args:
+        work_dir: Directory containing ``kernel_config.py``.
+        device_id: Hardware device index (fallback when no device log found).
+        device_log_dir: CANN device log directory snapshotted before the run.
+        pre_run_logs: Set of log files that existed before the run.
+        simpler_root: Path to the Simpler repository root.
+    """
+    import subprocess
+    import warnings
+    # Project root (python/pypto/runtime/ → python/pypto/ → python/ → project root)
+    _OUTPUTS_DIR = Path(__file__).resolve().parent.parent.parent.parent/"outputs"
+
+    if not simpler_root:
+        return
+
+    swimlane_script = Path(simpler_root) / "tools" / "swimlane_converter.py"
+    if not swimlane_script.exists():
+        warnings.warn(f"swimlane_converter.py not found at {swimlane_script}, skipping swimlane generation")
+        return
+
+    kernel_config_path = work_dir / "kernel_config.py"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = _OUTPUTS_DIR / f"merged_swimlane_{timestamp}.json"
+
+    cmd = [
+        sys.executable, str(swimlane_script),
+        "-k", str(kernel_config_path),
+        "-o", str(output_path),
+    ]
+
+    if device_log_dir is not None:
+        device_log_file = _wait_for_new_device_log(device_log_dir, pre_run_logs)
+        if device_log_file:
+            cmd += ["--device-log", str(device_log_file)]
+        else:
+            cmd += ["-d", str(device_id)]
+    else:
+        cmd += ["-d", str(device_id)]
+
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Swimlane JSON written to: {output_path}")
+    except subprocess.CalledProcessError as e:
+        warnings.warn(f"swimlane_converter.py failed (exit {e.returncode}), no swimlane generated")
 
 def _patch_orchestration_headers(work_dir: Path) -> None:
     """Add ``runtime.h`` and ``<iostream>`` includes to orchestration C++ files.

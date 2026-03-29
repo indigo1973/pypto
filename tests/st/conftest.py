@@ -123,6 +123,12 @@ def pytest_addoption(parser):
         default=False,
         help="Only generate code, skip runtime execution (default: False)",
     )
+    parser.addoption(
+        "--enable-profiling",
+        action="store_true",
+        default=False,
+        help="Enable runtime profiling and generate swimlane.json after execution.",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -146,6 +152,7 @@ def test_config(request) -> RunConfig:
         save_kernels_dir=save_kernels_dir,
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
+        enable_profiling=request.config.getoption("--enable-profiling"),
     )
 
 

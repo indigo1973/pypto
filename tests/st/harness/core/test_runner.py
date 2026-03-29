@@ -207,7 +207,10 @@ class TestRunner:
                 )
 
             platform = _resolve_platform(self.config.platform, backend_type)
-            _execute_on_device(work_dir, golden_path, platform, self.config.device_id)
+            _execute_on_device(
+                work_dir, golden_path, platform, self.config.device_id,
+                self.config.enable_profiling,
+            )
 
             return RunResult(
                 passed=True,
