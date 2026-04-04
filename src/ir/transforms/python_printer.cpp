@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1133,30 +1134,6 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
   }
 }
 
-// Collect all Var definition sites in DFS pre-order for SSA rename map construction.
-static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& out) {
-  if (!stmt) return;
-  if (auto assign = As<AssignStmt>(stmt)) {
-    out.push_back(assign->var_.get());
-  } else if (auto for_stmt = As<ForStmt>(stmt)) {
-    out.push_back(for_stmt->loop_var_.get());
-    for (auto& rv : for_stmt->return_vars_) out.push_back(rv.get());
-    for (auto& ia : for_stmt->iter_args_) out.push_back(ia.get());
-    CollectVarDefsInOrder(for_stmt->body_, out);
-  } else if (auto if_stmt = As<IfStmt>(stmt)) {
-    for (auto& rv : if_stmt->return_vars_) out.push_back(rv.get());
-    CollectVarDefsInOrder(if_stmt->then_body_, out);
-    if (if_stmt->else_body_.has_value()) CollectVarDefsInOrder(*if_stmt->else_body_, out);
-  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-    for (auto& rv : while_stmt->return_vars_) out.push_back(rv.get());
-    CollectVarDefsInOrder(while_stmt->body_, out);
-  } else if (auto seq = As<SeqStmts>(stmt)) {
-    for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
-  } else if (auto scope = As<ScopeStmt>(stmt)) {
-    CollectVarDefsInOrder(scope->body_, out);
-  }
-}
-
 // Collect MemRef definition sites in DFS pre-order for alloc name reuse.
 static void CollectMemRefDefsInOrder(const StmtPtr& stmt, std::vector<const MemRef*>& out) {
   if (!stmt) return;
@@ -1194,7 +1171,11 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   // Collect all Var def-sites in DFS pre-order: params first, then body.
   std::vector<const Var*> defs;
   for (auto& p : func->params_) defs.push_back(p.get());
-  if (func->body_) CollectVarDefsInOrder(func->body_, defs);
+  if (func->body_) {
+    var_collectors::VarDefUseCollector body_collector;
+    body_collector.VisitStmt(func->body_);
+    defs.insert(defs.end(), body_collector.var_defs_ordered.begin(), body_collector.var_defs_ordered.end());
+  }
   auto_name::BuildRenameMapForDefs(defs, var_rename_map_);
 }
 
@@ -1501,9 +1482,9 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
     if (func->body_) {
       collector.VisitStmt(func->body_);
-      std::vector<const Var*> body_defs;
-      CollectVarDefsInOrder(func->body_, body_defs);
-      defined_vars.insert(body_defs.begin(), body_defs.end());
+      var_collectors::VarDefUseCollector body_def_collector;
+      body_def_collector.VisitStmt(func->body_);
+      defined_vars.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
     }
   }
 

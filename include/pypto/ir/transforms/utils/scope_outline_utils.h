@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -42,94 +43,14 @@ namespace ir {
 using transform_utils::SubstituteStmt;
 namespace outline_utils {
 
-// ============================================================================
-// Helper visitors/mutators shared by scope-outlining passes
-// ============================================================================
-
-/** @brief Visitor to collect all variable references in an IR subtree (by pointer identity). */
-class VarRefCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> var_refs;
-
- protected:
-  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op.get()); }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    var_refs.insert(op.get());
-    // Do not traverse initValue_: when an IterArg appears as an expression
-    // reference (defined by an outer loop), its initValue_ belongs to that
-    // outer loop's initialization, not to the scope being analyzed.
-    // InitValues of IterArgs defined by inner ForStmt/WhileStmt are visited
-    // explicitly in VisitStmt_ overrides below.
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Explicitly visit initValue_ for IterArgs defined by THIS ForStmt.
-    // These are genuine references to variables from the enclosing scope
-    // that must be captured as inputs when outlining.
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
-
-/** @brief Visitor to collect all variable definitions in an IR subtree (by pointer identity). */
-class VarDefCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> var_defs;
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    var_defs.insert(op->var_.get());
-    // Don't visit the RHS - we only care about definitions
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    var_defs.insert(op->loop_var_.get());
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
+// Re-export from var_collectors for backward compatibility
+using var_collectors::VarDefUseCollector;
 
 /**
  * @brief Visitor to collect target tensors of tile.store calls (by pointer identity).
  *
  * These tensors are modified via side-effect inside scopes but are not
- * captured by VarDefCollector since they are defined externally.  The third
+ * captured by VarDefUseCollector since they are defined externally.  The third
  * argument of store is the output tensor.
  */
 class StoreTargetCollector : public IRVisitor {
@@ -323,12 +244,12 @@ class ScopeOutliner : public IRMutator {
       auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
       if (scope && scope->scope_kind_ == target_scope_kind_) {
         // Collect variables referenced in all subsequent statements
-        VarRefCollector after_ref_collector;
+        VarDefUseCollector after_ref_collector;
         for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
           after_ref_collector.VisitStmt(op->stmts_[j]);
         }
         // Also include variables required by parent scope
-        auto used_after = after_ref_collector.var_refs;
+        auto used_after = after_ref_collector.GetAllVarRefs();
         used_after.insert(required_outputs_.begin(), required_outputs_.end());
 
         // When no context is available (no subsequent statements and no parent
@@ -338,7 +259,7 @@ class ScopeOutliner : public IRMutator {
         // body (if/for/while) where the outer context hasn't propagated
         // required_outputs_.
         if (used_after.empty()) {
-          VarDefCollector fallback_def;
+          VarDefUseCollector fallback_def;
           fallback_def.VisitStmt(scope->body_);
           StoreTargetCollector fallback_store;
           fallback_store.VisitStmt(scope->body_);
@@ -377,7 +298,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Without context, treat all defined variables + store targets as outputs
-    VarDefCollector def_collector;
+    VarDefUseCollector def_collector;
     def_collector.VisitStmt(op->body_);
 
     StoreTargetCollector store_collector;
@@ -403,18 +324,16 @@ class ScopeOutliner : public IRMutator {
     name_stream << func_name_ << suffix << scope_counter_++;
     std::string outlined_func_name = name_stream.str();
 
-    // Analyze the scope body for inputs and outputs (before recursing)
-    VarRefCollector ref_collector;
-    ref_collector.VisitStmt(op->body_);
+    // Analyze the scope body for inputs and outputs (before recursing).
+    // A single VarDefUseCollector replaces the old VarRefCollector + VarDefCollector pair.
+    VarDefUseCollector body_collector;
+    body_collector.VisitStmt(op->body_);
 
-    VarDefCollector def_collector;
-    def_collector.VisitStmt(op->body_);
-
-    // Inputs: variables referenced but not defined in the scope.
+    // Inputs: variables used but not defined in the scope.
     // Look up the VarPtr from var_objects_ (outer symbol table) for each input.
     std::vector<VarPtr> input_vars;
-    for (const Var* var_ptr : ref_collector.var_refs) {
-      if (!def_collector.var_defs.count(var_ptr)) {
+    for (const Var* var_ptr : body_collector.var_uses) {
+      if (!body_collector.var_defs.count(var_ptr)) {
         auto obj_it = var_objects_.find(var_ptr);
         CHECK(obj_it != var_objects_.end())
             << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
@@ -432,7 +351,7 @@ class ScopeOutliner : public IRMutator {
     VarCollector scope_var_collector;
     scope_var_collector.VisitStmt(op->body_);
 
-    for (const Var* var_ptr : def_collector.var_defs) {
+    for (const Var* var_ptr : body_collector.var_defs) {
       if (used_after.count(var_ptr)) {
         auto scope_it = scope_var_collector.var_objects.find(var_ptr);
         CHECK(scope_it != scope_var_collector.var_objects.end())
@@ -456,7 +375,7 @@ class ScopeOutliner : public IRMutator {
     store_collector.VisitStmt(op->body_);
     std::unordered_map<const Var*, const Var*> store_body_ptrs;
     for (const Var* var_ptr : store_collector.store_targets) {
-      if (!def_collector.var_defs.count(var_ptr)) {
+      if (!body_collector.var_defs.count(var_ptr)) {
         auto ext_it = var_objects_.find(var_ptr);
         CHECK(ext_it != var_objects_.end())
             << "Variable " << var_ptr->name_hint_ << " not found in var_objects";

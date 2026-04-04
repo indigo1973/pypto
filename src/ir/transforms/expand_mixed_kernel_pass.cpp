@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -602,7 +603,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // references to the fresh parameter corresponding to the store's output tensor.
   {
     // Collect all vars defined in the AIV body
-    outline_utils::VarDefCollector aiv_def_collector;
+    outline_utils::VarDefUseCollector aiv_def_collector;
     auto aiv_body_stmt = MakeBody(aiv_final, func->span_);
     aiv_def_collector.VisitStmt(aiv_body_stmt);
 
@@ -701,9 +702,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     };
     walk_origins(stmts);
 
-    outline_utils::VarRefCollector aiv_ref_collector;
+    outline_utils::VarDefUseCollector aiv_ref_collector;
     aiv_ref_collector.VisitStmt(aiv_body_stmt);
-    for (const Var* ref_ptr : aiv_ref_collector.var_refs) {
+    auto aiv_all_refs = var_collectors::GetSortedVarRefs(aiv_ref_collector.GetAllVarRefs());
+    for (const Var* ref_ptr : aiv_all_refs) {
       if (!ref_ptr || aiv_def_collector.var_defs.count(ref_ptr) || aiv_map.count(ref_ptr)) {
         continue;
       }
