@@ -934,12 +934,40 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   }
 
   // Add chunk kwargs
-  if (op->chunk_size_.has_value()) {
+  if (op->chunk_config_.has_value()) {
     stream_ << ", chunk=";
-    VisitExpr(*op->chunk_size_);
-    if (op->chunk_policy_ != ChunkPolicy::LeadingFull) {
-      stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_policy_) << "\"";
+    VisitExpr(op->chunk_config_->size);
+    if (op->chunk_config_->policy != ChunkPolicy::LeadingFull) {
+      stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_config_->policy) << "\"";
     }
+  }
+
+  // Add attrs kwargs
+  if (!op->attrs_.empty()) {
+    stream_ << ", attrs={";
+    bool first_attr = true;
+    for (const auto& [key, value] : op->attrs_) {
+      if (!first_attr) stream_ << ", ";
+      first_attr = false;
+      stream_ << std::quoted(key) << ": ";
+      if (value.type() == typeid(LoopOrigin)) {
+        stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
+      } else if (value.type() == typeid(int)) {
+        stream_ << AnyCast<int>(value, key);
+      } else if (value.type() == typeid(double)) {
+        stream_ << FormatFloatLiteral(AnyCast<double>(value, key));
+      } else if (value.type() == typeid(float)) {
+        stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, key)));
+      } else if (value.type() == typeid(bool)) {
+        stream_ << (AnyCast<bool>(value, key) ? "True" : "False");
+      } else if (value.type() == typeid(std::string)) {
+        stream_ << std::quoted(AnyCast<std::string>(value, key));
+      } else {
+        INTERNAL_CHECK(false) << "Unsupported attrs value type for key '" << key
+                              << "': " << DemangleTypeName(value.type().name());
+      }
+    }
+    stream_ << "}";
   }
 
   stream_ << "):\n";
