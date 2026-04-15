@@ -24,6 +24,7 @@
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -429,6 +430,39 @@ void BindPass(nb::module_& m) {
              nb::arg("properties") = PassProperties{},
              "Create a pass from a Python program-level transform.\n\n"
              "The transform receives a Program and returns a (possibly new) Program.");
+
+  // Statement dependency analysis submodule (RFC #1026 Phase 1 — issue #1027).
+  nb::module_ dep_analysis = passes.def_submodule(
+      "stmt_dependency_analysis", "Statement dependency analysis and InOut-use discipline check");
+
+  nb::class_<stmt_dep::StmtDependencyGraph>(dep_analysis, "StmtDependencyGraph",
+                                            "Dataflow dependency graph over a region's top-level statements")
+      .def_ro("stmts", &stmt_dep::StmtDependencyGraph::stmts, "Top-level stmts of the region in order")
+      .def(
+          "get_predecessors",
+          [](const stmt_dep::StmtDependencyGraph& self, const StmtPtr& stmt) {
+            std::vector<StmtPtr> result;
+            if (!stmt) return result;
+            auto it = self.predecessors.find(stmt.get());
+            if (it == self.predecessors.end()) return result;
+            // Preserve region order for determinism.
+            for (const auto& s : self.stmts) {
+              if (it->second.count(s.get())) result.push_back(s);
+            }
+            return result;
+          },
+          nb::arg("stmt"), "Return the predecessor stmts of the given stmt in region order");
+
+  dep_analysis.def("build_stmt_dependency_graph", &stmt_dep::BuildStmtDependencyGraph, nb::arg("region"),
+                   nb::arg("program").none() = nb::none(),
+                   "Build a dataflow dependency graph over a region's top-level stmts. "
+                   "When `program` is provided, the InOut-use discipline is checked first "
+                   "and any violation raises pypto.Error (VerificationError).");
+
+  dep_analysis.def("check_inout_use_discipline", &stmt_dep::CheckInOutUseDiscipline, nb::arg("region"),
+                   nb::arg("program"),
+                   "Enforce the InOut-use discipline; raises pypto.Error (VerificationError) "
+                   "on any violation so compilation halts rather than proceeding with unsound IR.");
 }
 
 }  // namespace python
