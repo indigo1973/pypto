@@ -20,14 +20,30 @@ from pypto.pypto_core import ir
 
 
 def _collect_call_args(func: ir.Function, op_name: str) -> list[list]:
-    """Collect argument lists of all Calls matching *op_name* in a function body."""
+    """Collect argument lists of all Calls matching *op_name* anywhere in the
+    function body, recursing into ``ForStmt``/``WhileStmt``/``IfStmt``/``SeqStmts``
+    bodies so loop-local calls are not missed.
+    """
     results: list[list] = []
-    body = func.body
-    assert isinstance(body, ir.SeqStmts)
-    for stmt in body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == op_name:
-                results.append(list(stmt.value.args))
+
+    def visit(node: object) -> None:
+        if isinstance(node, ir.AssignStmt) and isinstance(node.value, ir.Call):
+            if node.value.op.name == op_name:
+                results.append(list(node.value.args))
+            return
+        if isinstance(node, ir.SeqStmts):
+            for s in node.stmts:
+                visit(s)
+            return
+        body = getattr(node, "body", None)
+        if body is not None:
+            visit(body)
+        for attr in ("then_body", "else_body"):
+            branch = getattr(node, attr, None)
+            if branch is not None:
+                visit(branch)
+
+    visit(func.body)
     return results
 
 
@@ -320,6 +336,91 @@ class TestScopeShadowingSafety:
         assert isinstance(scalar_arg, ir.Add), (
             f"Expected ir.Add for mixed DSL+closure expression, got {type(scalar_arg).__name__}"
         )
+
+
+def _assert_all_slice_extents_are_constint(func: ir.Function, expected_dims: list[int]) -> None:
+    """Verify every ``tensor.slice`` call in *func* has shape_tuple = expected_dims."""
+    slice_calls = _collect_call_args(func, "tensor.slice")
+    assert slice_calls, "expected tensor.slice calls to be emitted"
+    for args in slice_calls:
+        extent = args[1]  # tensor.slice(tensor, shape_tuple, offset_tuple)
+        assert isinstance(extent, ir.MakeTuple)
+        actual = []
+        for dim in extent.elements:
+            assert isinstance(dim, ir.ConstInt), (
+                f"slice extent dim should be folded to ConstInt, got {type(dim).__name__}: {dim}"
+            )
+            actual.append(dim.value)
+        assert actual == expected_dims, f"expected slice shape {expected_dims}, got {actual}"
+
+
+class TestSymbolicShapeEquality:
+    """Symbolic dimension expressions that simplify to the same value should
+    compare equal. Covers the subscript-slice pattern where extent is built
+    as ``upper - lower`` with a loop induction variable on both sides."""
+
+    def test_slice_extent_simplifies_to_constant(self):
+        """``x[:, k : k + C]`` inside a loop produces a literal-C extent."""
+        C = 64
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 64], pl.BF16]:
+            out = a[:, 0:C]
+            for k in pl.range(C, 256, C):
+                out = a[:, k : k + C]
+            return out
+
+        assert isinstance(func, ir.Function)
+        _assert_all_slice_extents_are_constint(func, [8, C])
+
+    def test_loop_induction_slice_extent_folds(self):
+        """``x[:, i * s : (i + 1) * s]`` folds to extent ``s``."""
+        S = 32
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 32], pl.BF16]:
+            out = a[:, 0:S]
+            for i in pl.range(8):
+                out = a[:, i * S : (i + 1) * S]
+            return out
+
+        assert isinstance(func, ir.Function)
+        _assert_all_slice_extents_are_constint(func, [8, S])
+
+    def test_reassign_across_loop_with_symbolic_extent(self):
+        """Reassignment of a tensor variable inside a loop with a symbolic
+        slice extent should succeed — the pre-fix parser rejected this with
+        'Cannot reassign with a different type' because the slice shape built
+        as ``k + C - k`` did not match the initial ``C`` shape."""
+        C = 64
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 64], pl.BF16]:
+            chunk = a[:, 0:C]
+            for k in pl.range(C, 256, C):
+                chunk = a[:, k : k + C]
+            return chunk
+
+        assert isinstance(func, ir.Function)
+
+    def test_symbolic_cancellation_in_broadcast_sub(self):
+        """``pl.sub`` of two slices whose extents simplify to the same constant
+        but differ structurally should pass shape broadcasting.  Pre-fix this
+        raised 'requires compatible shapes'."""
+        HALF = 32
+
+        @pl.function
+        def func(
+            src: pl.Tensor[[1, 128], pl.FP32],
+            out: pl.Tensor[[1, 32], pl.FP32],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            for k in pl.range(0, 64, HALF):
+                lo = src[:, k : k + HALF]
+                hi = src[:, k + HALF : k + HALF + HALF]
+                out = pl.sub(lo, hi)
+            return out
+
+        assert isinstance(func, ir.Function)
 
 
 if __name__ == "__main__":
