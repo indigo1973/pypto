@@ -31,6 +31,11 @@ struct OrchestrationResult {
   std::string code;                                            ///< Generated C++ orchestration code
   std::map<std::string, int> func_name_to_id;                  ///< Kernel function name -> ID mapping
   std::map<std::string, ir::CoreType> func_name_to_core_type;  ///< Kernel function name -> core type
+  /// Sidecar JSON describing per-site producer/consumer tensor references.
+  /// Consumed by the runtime host-side profiling collector to reconstruct
+  /// fanout edges that the ring-buffer runtime cannot observe after slot
+  /// recycling. Empty when there are no submit sites.
+  std::string task_graph_json;
 };
 
 /**

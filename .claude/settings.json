@@ -1,0 +1,10 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-a2TVBWOxAGmDD6CDuay3kpCc6asWmDIXYC2PqKuXApCtlLho",
+    "ANTHROPIC_BASE_URL": "https://api.lingyaai.cn",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "model": "opus",
+  "effortLevel": "high"
+}

@@ -57,6 +57,11 @@ class OrchestrationResult:
         """Kernel function name to core type mapping."""
         ...
 
+    @property
+    def task_graph_json(self) -> str:
+        """IR-derived task graph sidecar (JSON) for profiling fanout recovery."""
+        ...
+
 class DistributedCodegen:
     """Distributed codegen for Linqu hierarchy runtime C++ code."""
 

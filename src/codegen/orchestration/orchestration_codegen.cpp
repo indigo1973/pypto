@@ -1147,6 +1147,246 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 };
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// TaskGraphExporter
+// ---------------------------------------------------------------------------
+//
+// Walks the orchestration function body lexically, enumerating every submit
+// call site (task) in its natural submit order. For each site we record the
+// callee name and, per tensor argument, the buffer-root SSA name plus the
+// effective call-site direction (INPUT / INOUT / OUTPUT).
+//
+// The runtime profiling collector (performance_collector.cpp) consumes this
+// sidecar to derive IR-level fanout edges: a site that reads/inouts tensor T
+// depends on every prior site that wrote/inouts T. Runtime tasks are grouped
+// by func_id and matched to IR sites by submit order within the same func_id.
+//
+// Intentional simplifications (documented, not hidden):
+//   * We do NOT derive per-iteration tensor slices. A producer site that
+//     writes partial slices of T is conservatively treated as writing the
+//     entire T from the consumer's point of view. This yields a super-set of
+//     true edges, which is the correct direction for profiling-edge recovery.
+//   * Loop iteration bounds are not materialized at compile time. Runtime
+//     instance counts come from actual PerfRecord observations per site.
+//
+// Only the IR signals that matter for producer-consumer dependency (which
+// tensor, which direction) are exported. Edge derivation lives entirely on
+// the host collector side.
+
+class TaskGraphExporter : public ir::IRVisitor {
+ public:
+  struct TensorRef {
+    std::string tensor_root;   // Buffer-root SSA var name (external param or local alloc)
+    std::string direction;     // "in", "out", "inout"
+  };
+  struct Site {
+    int site_id;
+    std::string callee;
+    int func_id;
+    std::string core_type;              // "AIV" or "AIC"
+    std::vector<TensorRef> tensors;
+  };
+
+  TaskGraphExporter(const ir::ProgramPtr& program,
+                    const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots,
+                    const std::unordered_map<const ir::Call*, std::vector<ir::ParamDirection>>& site_dirs,
+                    const std::map<std::string, int>& func_name_to_id,
+                    const std::map<std::string, ir::CoreType>& func_name_to_core_type)
+      : program_(program),
+        buffer_roots_(buffer_roots),
+        site_dirs_(site_dirs),
+        func_name_to_id_(func_name_to_id),
+        func_name_to_core_type_(func_name_to_core_type) {}
+
+  std::vector<Site> sites;
+
+ protected:
+  void VisitExpr_(const ir::CallPtr& call) override {
+    // Ignore tile.*/tensor.*/system.* builtins.
+    if (IsBuiltinOp(call->op_->name_)) {
+      IRVisitor::VisitExpr_(call);
+      return;
+    }
+    auto gv = ir::As<ir::GlobalVar>(call->op_);
+    if (!gv) {
+      IRVisitor::VisitExpr_(call);
+      return;
+    }
+    auto callee = program_->GetFunction(gv->name_);
+    if (!callee) {
+      IRVisitor::VisitExpr_(call);
+      return;
+    }
+
+    // For Group/Spmd callees, dispatch may resolve to multiple concrete
+    // kernels. For IR-graph fanout recovery we treat the submission site as
+    // a single logical task (the runtime submits once); mapping to inner
+    // callees at replay time is a refinement for later.
+    std::string resolved_name = callee->name_;
+    if (callee->func_type_ == ir::FunctionType::Group ||
+        callee->func_type_ == ir::FunctionType::Spmd) {
+      // Name resolution mirrors the codegen's per-type handling; for task
+      // graph purposes we just need a unique callee name that the host can
+      // correlate with func_name_to_id. Pick the first concrete (AIC/AIV)
+      // kernel in the group body.
+      resolved_name = ResolveGroupConcreteName(callee);
+      if (resolved_name.empty()) {
+        // Fallback: keep wrapper name so sidecar stays well-formed.
+        resolved_name = callee->name_;
+      }
+    }
+
+    Site site;
+    site.site_id = static_cast<int>(sites.size());
+    site.callee = resolved_name;
+    auto id_it = func_name_to_id_.find(resolved_name);
+    site.func_id = (id_it != func_name_to_id_.end()) ? id_it->second : -1;
+    auto ct_it = func_name_to_core_type_.find(resolved_name);
+    site.core_type = (ct_it != func_name_to_core_type_.end())
+                         ? (ct_it->second == ir::CoreType::CUBE ? "AIC" : "AIV")
+                         : "";
+
+    // Per-argument direction: prefer resolved call-site directions; fall back
+    // to the callee's declared param_directions_ (which already exists by
+    // this point in the pipeline).
+    const std::vector<ir::ParamDirection>* dirs = nullptr;
+    auto it = site_dirs_.find(call.get());
+    if (it != site_dirs_.end()) {
+      dirs = &it->second;
+    } else if (!callee->param_directions_.empty()) {
+      dirs = &callee->param_directions_;
+    }
+
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      auto arg_var = ir::AsVarLike(call->args_[i]);
+      if (!arg_var) continue;
+      if (!ir::As<ir::TensorType>(call->args_[i]->GetType())) continue;
+
+      const ir::Var* root = ResolveBufferRoot(arg_var.get());
+      if (root == nullptr) root = arg_var.get();
+      std::string root_name = GetSSABaseName(root->name_hint_);
+
+      std::string dir = "in";
+      if (dirs != nullptr && i < dirs->size()) {
+        switch ((*dirs)[i]) {
+          case ir::ParamDirection::In:
+            dir = "in";
+            break;
+          case ir::ParamDirection::Out:
+            dir = "out";
+            break;
+          case ir::ParamDirection::InOut:
+            dir = "inout";
+            break;
+        }
+      }
+      site.tensors.push_back({std::move(root_name), std::move(dir)});
+    }
+
+    sites.push_back(std::move(site));
+    IRVisitor::VisitExpr_(call);
+  }
+
+ private:
+  const ir::Var* ResolveBufferRoot(const ir::Var* var) const {
+    int guard = 32;
+    const ir::Var* cur = var;
+    while (guard-- > 0) {
+      auto it = buffer_roots_.find(cur);
+      if (it == buffer_roots_.end() || it->second == cur) return cur;
+      cur = it->second;
+    }
+    return cur;
+  }
+
+  std::string ResolveGroupConcreteName(const ir::FunctionPtr& group_func) const {
+    std::string aic_name, aiv_name;
+    class Finder : public ir::IRVisitor {
+     public:
+      Finder(const ir::ProgramPtr& prog, std::string* aic, std::string* aiv)
+          : program_(prog), aic_(aic), aiv_(aiv) {}
+      const ir::ProgramPtr& program_;
+      std::string* aic_;
+      std::string* aiv_;
+      void VisitExpr_(const ir::CallPtr& call) override {
+        if (auto gv = ir::As<ir::GlobalVar>(call->op_)) {
+          if (auto callee = program_->GetFunction(gv->name_)) {
+            if (callee->func_type_ == ir::FunctionType::AIC && aic_->empty()) *aic_ = callee->name_;
+            else if (callee->func_type_ == ir::FunctionType::AIV && aiv_->empty()) *aiv_ = callee->name_;
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+    Finder finder(program_, &aic_name, &aiv_name);
+    finder.VisitStmt(group_func->body_);
+    if (!aic_name.empty()) return aic_name;
+    if (!aiv_name.empty()) return aiv_name;
+    return "";
+  }
+
+  const ir::ProgramPtr& program_;
+  const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots_;
+  const std::unordered_map<const ir::Call*, std::vector<ir::ParamDirection>>& site_dirs_;
+  const std::map<std::string, int>& func_name_to_id_;
+  const std::map<std::string, ir::CoreType>& func_name_to_core_type_;
+};
+
+std::string EscapeJsonString(const std::string& s) {
+  std::ostringstream oss;
+  for (char c : s) {
+    switch (c) {
+      case '"': oss << "\\\""; break;
+      case '\\': oss << "\\\\"; break;
+      case '\n': oss << "\\n"; break;
+      case '\r': oss << "\\r"; break;
+      case '\t': oss << "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          oss << "\\u" << std::hex << static_cast<int>(c) << std::dec;
+        } else {
+          oss << c;
+        }
+    }
+  }
+  return oss.str();
+}
+
+std::string SerializeTaskGraph(const std::string& orch_name,
+                               const std::vector<TaskGraphExporter::Site>& sites) {
+  std::ostringstream oss;
+  oss << "{\n";
+  oss << "  \"version\": 1,\n";
+  oss << "  \"orchestration\": \"" << EscapeJsonString(orch_name) << "\",\n";
+  oss << "  \"note\": \"IR-derived task graph for profiling fanout recovery. "
+         "Each site is a submit call in lexical order; runtime tasks of the same func_id "
+         "are matched to sites in submit order on the host.\",\n";
+  oss << "  \"sites\": [";
+  for (size_t i = 0; i < sites.size(); ++i) {
+    const auto& s = sites[i];
+    if (i > 0) oss << ",";
+    oss << "\n    {";
+    oss << "\"site_id\": " << s.site_id;
+    oss << ", \"callee\": \"" << EscapeJsonString(s.callee) << "\"";
+    oss << ", \"func_id\": " << s.func_id;
+    oss << ", \"core_type\": \"" << EscapeJsonString(s.core_type) << "\"";
+    oss << ", \"tensors\": [";
+    for (size_t j = 0; j < s.tensors.size(); ++j) {
+      if (j > 0) oss << ", ";
+      oss << "{\"root\": \"" << EscapeJsonString(s.tensors[j].tensor_root) << "\", ";
+      oss << "\"dir\": \"" << EscapeJsonString(s.tensors[j].direction) << "\"}";
+    }
+    oss << "]}";
+  }
+  oss << "\n  ]\n";
+  oss << "}\n";
+  return oss.str();
+}
+
+}  // namespace
+
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
@@ -1213,6 +1453,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
+  auto call_site_directions_for_export = direction_resolver.call_site_directions;
   stmt_codegen.SetCallSiteDirections(std::move(direction_resolver.call_site_directions));
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   stmt_codegen.SetInitialIndent(8);
@@ -1253,7 +1494,14 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
 
-  return OrchestrationResult{oss.str(), std::move(func_name_to_id), std::move(func_name_to_core_type)};
+  TaskGraphExporter exporter(program, root_collector.buffer_roots,
+                             call_site_directions_for_export, func_name_to_id,
+                             func_name_to_core_type);
+  exporter.VisitStmt(func->body_);
+  std::string task_graph_json = SerializeTaskGraph(func->name_, exporter.sites);
+
+  return OrchestrationResult{oss.str(), std::move(func_name_to_id),
+                             std::move(func_name_to_core_type), std::move(task_graph_json)};
 }
 
 }  // namespace codegen

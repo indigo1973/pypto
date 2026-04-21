@@ -339,6 +339,7 @@ def _execute_on_device(
     # Execute
     if runtime_profiling:
         pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+        _set_task_graph_env(work_dir)
 
     execute_on_device(
         chip_callable,
@@ -350,6 +351,7 @@ def _execute_on_device(
     )
 
     if runtime_profiling:
+        _clear_task_graph_env()
         _collect_swimlane_data(
             work_dir,
             platform,
@@ -371,6 +373,19 @@ def _execute_on_device(
 # ---------------------------------------------------------------------------
 # Swimlane profiling helpers
 # ---------------------------------------------------------------------------
+
+_TASK_GRAPH_ENV = "PYPTO_TASK_GRAPH_JSON"
+
+
+def _set_task_graph_env(work_dir: Path) -> None:
+    """Point the runtime at the IR-derived task graph sidecar if it exists."""
+    tg = work_dir / "orchestration" / "task_graph.json"
+    if tg.exists():
+        os.environ[_TASK_GRAPH_ENV] = str(tg)
+
+
+def _clear_task_graph_env() -> None:
+    os.environ.pop(_TASK_GRAPH_ENV, None)
 
 
 def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path], Path | None, set[Path]]:
@@ -649,6 +664,7 @@ def execute_compiled(
     # Snapshot profiling state before execution
     if runtime_profiling:
         pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+        _set_task_graph_env(work_dir)
 
     execute_on_device(
         chip_callable,
@@ -661,6 +677,7 @@ def execute_compiled(
 
     # Collect swimlane data after execution
     if runtime_profiling:
+        _clear_task_graph_env()
         _collect_swimlane_data(
             work_dir, platform, device_id, pre_run_logs, device_log_dir, pre_run_perf_files
         )
