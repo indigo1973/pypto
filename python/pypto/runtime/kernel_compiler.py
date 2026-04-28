@@ -378,6 +378,14 @@ class KernelCompiler:
 
         cmd = [toolchain.cxx_path] + toolchain.get_compile_flags()
 
+        # Force a deterministic ELF GNU Build-ID so simpler's DeviceRunner orch-SO
+        # upload cache (keyed on .note.gnu.build-id) stays stable across GCC/ld
+        # versions. The aarch64 cross-toolchain always produces Linux ELF and
+        # ships GNU ld, so it supports --build-id even on a macOS host. Only
+        # skip when host g++ runs on macOS (Mach-O target, Apple ld).
+        if isinstance(toolchain, Aarch64GxxToolchain) or sys.platform != "darwin":
+            cmd.append("-Wl,--build-id=sha1")
+
         if extra_sources:
             for src in extra_sources:
                 src = os.path.abspath(src)
