@@ -17,7 +17,7 @@ Accessed as ``pl.tile.*``
 
 import warnings
 from collections.abc import Sequence
-from typing import overload
+from typing import Any, overload
 
 __all__ = [
     "MemRefType",
@@ -128,6 +128,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
+from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
@@ -196,6 +197,46 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
+def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:
+    """Coerce a scalar-binary operand to an ``Expr``.
+
+    Used by the scalar-pair branches of ``tile.min`` / ``tile.max``: ``Scalar``
+    is unwrapped to its inner ``Expr``, raw ``Expr`` is forwarded as-is, and a
+    bare ``int`` is materialized as ``ConstInt(.., INDEX)`` with the span
+    pinned by the parser if any (so error messages and dumps point at the
+    user's source line, not this wrapper). ``INDEX`` matches the dtype the
+    parser uses for plain int literals, so round-tripped programs don't
+    sprout spurious casts on otherwise-equivalent constants.
+    """
+    if isinstance(value, Scalar):
+        return value.unwrap()
+    if isinstance(value, Expr):
+        return value
+    return _ir_core.ConstInt(value, DataType.INDEX, _get_span_or_capture())
+
+
+def _axis_to_int(axis: int | Scalar | Expr) -> int:
+    """Coerce a compile-time axis argument to a Python ``int``.
+
+    The parser passes integer literals through as raw ``ConstInt`` (to
+    preserve dtype) — accept that shape and unwrap. Direct callers can
+    still pass a bare ``int``.
+    """
+    if isinstance(axis, bool):  # bool is an int subclass; reject explicitly
+        raise TypeError(f"axis must be int, got bool ({axis!r})")
+    if isinstance(axis, int):
+        return axis
+    if isinstance(axis, _ir_core.ConstInt):
+        return int(axis.value)
+    if isinstance(axis, Scalar):
+        inner = axis.unwrap()
+        if isinstance(inner, _ir_core.ConstInt):
+            return int(inner.value)
+    raise TypeError(
+        f"axis must be a compile-time int (or ConstInt/Scalar wrapping one), got {type(axis).__name__}"
+    )
+
+
 def create(
     shape: Sequence[IntLike],
     dtype: DataType,
@@ -241,27 +282,31 @@ def read(tile: Tile, indices: IntLike | Sequence[IntLike]) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def write(tile: Tile, indices: IntLike | Sequence[IntLike], value: Scalar) -> None:
+def write(tile: Tile, indices: IntLike | Sequence[IntLike], value: Scalar | Expr) -> Expr:
     """Write a scalar value into a tile at given indices.
 
     Args:
         tile: Destination tile
         indices: A single index expression (for 1-D flat access) or a list of
             index expressions (one per tile dimension)
-        value: Scalar value to write
+        value: Scalar value to write (DSL Scalar or raw Expr)
+
+    Returns:
+        The underlying ``tile.write`` call expression. Direct callers
+        typically ignore it; the DSL parser surfaces it as an ``EvalStmt``.
     """
     # Allow a bare IntLike as a flat 1-D index for backwards compatibility
     indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
-    call_expr = _ir_ops.write(tile.unwrap(), _normalize_intlike(indices_seq), value.unwrap())
-    _ = call_expr  # result is the tile itself; discarded here
+    value_expr = value.unwrap() if isinstance(value, Scalar) else value
+    return _ir_ops.write(tile.unwrap(), _normalize_intlike(indices_seq), value_expr)
 
 
 def load(
     tensor: Tensor,
     offsets: Sequence[IntLike],
     shapes: Sequence[IntLike],
-    target_memory: MemorySpace = MemorySpace.Vec,
     valid_shapes: Sequence[IntLike] | None = None,
+    target_memory: MemorySpace = MemorySpace.Vec,
     transpose: bool = False,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
@@ -379,27 +424,26 @@ def extract(
     return Tile(expr=call_expr)
 
 
-def scatter_update(
-    input: Tile,
-    dim: int,
-    index: Tile,
-    src: Tile,
-    scratch: Tile,
-) -> Tile:
+def scatter_update(input: Tile, *args: Any, **kwargs: Any) -> Tile:
     """Update tile rows at positions specified by 2D index tile with values from src.
 
-    Args:
-        input: Destination tile (2D or 4D)
-        dim: Dimension to scatter along (currently only -2 is supported)
-        index: 2D index tile [b, s] of integer dtype
-        src: Source tile (same rank as input)
-        scratch: [1, d] scratch row tile (Vec memory) used as the per-row staging buffer
+    Accepts the same flexible call shapes as the IR builder
+    ``pypto.ir.op.tile.scatter_update``:
 
-    Returns:
-        Tile wrapping the scatter_update operation
+    - ``scatter_update(input, dim, index, src, scratch)``
+    - ``scatter_update(input, index, src, scratch, dim=-2)``
+    - ``scatter_update(input, dim, index=..., src=..., scratch=...)``
+
+    Tile / Scalar wrappers are unwrapped before forwarding so the IR builder
+    receives raw ``Expr`` operands.
     """
-    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap(), scratch.unwrap())
-    return Tile(expr=call_expr)
+
+    def _unwrap(v: Any) -> Any:
+        return v.unwrap() if isinstance(v, (Tile, Scalar)) else v
+
+    fwd_args = tuple(_unwrap(a) for a in args)
+    fwd_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
+    return Tile(expr=_ir_ops.scatter_update(input.unwrap(), *fwd_args, **fwd_kwargs))
 
 
 def concat(src0: Tile, src1: Tile) -> Tile:
@@ -566,7 +610,7 @@ def get_block_num() -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def add(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+def add(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
     """Element-wise addition of tile and tile or scalar.
 
     Args:
@@ -580,7 +624,7 @@ def add(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
-def sub(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+def sub(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
     """Element-wise subtraction of tile and tile or scalar.
 
     Args:
@@ -594,7 +638,7 @@ def sub(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
-def mul(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+def mul(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
     """Element-wise multiplication of tile and tile or scalar.
 
     Args:
@@ -608,7 +652,7 @@ def mul(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
-def div(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+def div(lhs: Tile, rhs: Tile | int | float | Scalar | Expr) -> Tile:
     """Element-wise division of tile and tile or scalar.
 
     Args:
@@ -1224,7 +1268,7 @@ def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     Returns:
         Tile wrapping the sum operation
     """
-    call_expr = _ir_ops.sum(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.sum(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 
@@ -1236,7 +1280,7 @@ def max(tile: Tile, axis: int, keepdim: bool = False) -> Tile: ...
 def max(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
 
 
-def max(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
+def max(tile: Tile | Scalar, axis: int | Scalar | Expr = 0, keepdim: bool = False) -> Tile | Scalar:
     """Max reduction along specified axis, or scalar max of two values.
 
     Args:
@@ -1248,14 +1292,8 @@ def max(tile: Tile | Scalar, axis: int | Scalar = 0, keepdim: bool = False) -> T
         Tile or Scalar wrapping the max operation
     """
     if isinstance(tile, Scalar):
-        rhs: Expr = (
-            axis.unwrap()
-            if isinstance(axis, Scalar)
-            else _ir_core.ConstInt(axis, DataType.INT32, _ir_core.Span.unknown())
-        )
-        return Scalar(expr=_ir_core.max_(tile.unwrap(), rhs))
-    assert isinstance(axis, int)
-    call_expr = _ir_ops.max(tile.unwrap(), axis, keepdim)
+        return Scalar(expr=_ir_core.max_(tile.unwrap(), _scalar_operand_to_expr(axis)))
+    call_expr = _ir_ops.max(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 
@@ -1271,7 +1309,11 @@ def min(tile: Scalar, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
 def min(tile: int, axis: Scalar | int, keepdim: bool = False) -> Scalar: ...
 
 
-def min(tile: Tile | Scalar | int, axis: int | Scalar = 0, keepdim: bool = False) -> Tile | Scalar:
+def min(
+    tile: Tile | Scalar | int | Expr,
+    axis: int | Scalar | Expr = 0,
+    keepdim: bool = False,
+) -> Tile | Scalar:
     """Min reduction along specified axis, or scalar min of two values.
 
     Args:
@@ -1282,20 +1324,11 @@ def min(tile: Tile | Scalar | int, axis: int | Scalar = 0, keepdim: bool = False
     Returns:
         Tile or Scalar wrapping the min operation
     """
-    if isinstance(tile, (Scalar, int)):
-        lhs: Expr = (
-            tile.unwrap()
-            if isinstance(tile, Scalar)
-            else _ir_core.ConstInt(tile, DataType.INT32, _ir_core.Span.unknown())
-        )
-        rhs: Expr = (
-            axis.unwrap()
-            if isinstance(axis, Scalar)
-            else _ir_core.ConstInt(axis, DataType.INT32, _ir_core.Span.unknown())
-        )
+    if isinstance(tile, (Scalar, int, Expr)):
+        lhs = _scalar_operand_to_expr(tile)
+        rhs = _scalar_operand_to_expr(axis)
         return Scalar(expr=_ir_core.min_(lhs, rhs))
-    assert isinstance(axis, int)
-    call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.min(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 
