@@ -949,6 +949,8 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
 }
 
 FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
+  // Plain INTERNAL_CHECK: RequiresNoSplitDualAivSync short-circuits on null
+  // func, so func->span_ would dereference null in the failure path.
   INTERNAL_CHECK(RequiresNoSplitDualAivSync(func))
       << "Internal error: ProcessNoSplitDualAivFunction requires dual-dispatch AIV marker";
 
