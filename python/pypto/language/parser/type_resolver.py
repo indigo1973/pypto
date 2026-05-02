@@ -73,6 +73,33 @@ def _try_get_static_dim(dim: ir.Expr) -> int | None:
     return None
 
 
+def _is_index_expr_type(t: "ir.Type | None") -> bool:
+    """Whether ``t`` is admissible for a TileView/TensorView field expression.
+
+    Mirrors the C++ contract: TileView fields are integer/index scalars
+    (constants, dyn vars, and arithmetic over them). Excludes tile, tensor,
+    tuple, float, and bool types.
+    """
+    if not isinstance(t, ir.ScalarType):
+        return False
+    return t.dtype == DataType.INDEX or t.dtype.is_int()
+
+
+def _is_pl_yield_call(node: ast.expr) -> bool:
+    """Detect ``pl.yield_(...)`` / bare ``yield_(...)`` call nodes.
+
+    ``parse_yield_call`` emits an ``ir.YieldStmt`` to the builder as a side
+    effect — incompatible with the pure-expression contract type-annotation
+    parsing assumes.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "yield_":
+        return True
+    return isinstance(func, ast.Name) and func.id == "yield_"
+
+
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
@@ -150,6 +177,7 @@ class TypeResolver:
         scope_lookup: Callable[[str], Any | None] | None = None,
         span_tracker: "SpanTracker | None" = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
+        parse_expression: Callable[[ast.expr], "ir.Expr"] | None = None,
     ):
         """Initialize type resolver.
 
@@ -162,11 +190,17 @@ class TypeResolver:
                 objects. When provided, multiple TypeResolvers share the same cache,
                 ensuring the same DynVar produces the same ir.Var across functions
                 in a program.
+            parse_expression: Optional callback to the enclosing parser's full
+                expression parser. When set, TileView/TensorView fields accept any
+                index expression the DSL itself can parse (matching what the C++
+                ``ir.TileView`` constructor accepts), not just integer constants
+                and bare names.
         """
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
         self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
+        self._parse_expression = parse_expression
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -1247,7 +1281,14 @@ class TypeResolver:
         return [self._parse_tileview_expr(elt) for elt in node.elts]
 
     def _parse_tileview_expr(self, node: ast.expr) -> "ir.Expr":
-        """Parse a single expression for a TileView field."""
+        """Parse a single expression for a TileView field.
+
+        TileView fields admit arbitrary index expressions, matching what the
+        C++ ``ir.TileView`` constructor accepts. Integer constants and bare
+        names use fast paths here; richer expressions (calls, arithmetic,
+        attribute access, etc.) fall through to the same expression parser
+        that the DSL uses everywhere else.
+        """
         val = self._try_resolve_int(node)
         if val is not None:
             return ir.ConstInt(val, DataType.INDEX, self._get_span(node))
@@ -1284,10 +1325,38 @@ class TypeResolver:
             if name not in self._dyn_var_cache:
                 self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
             return self._dyn_var_cache[name]
+        if self._parse_expression is not None:
+            # Pre-flight: pl.yield_() emits an ir.YieldStmt to the builder as a side
+            # effect during parsing. Type-annotation parsing must stay pure, so reject
+            # the call before delegation rather than after — otherwise the spurious
+            # YieldStmt is already in the builder when we throw.
+            if _is_pl_yield_call(node):
+                raise ParserTypeError(
+                    "TileView field cannot contain pl.yield_() — it would emit a "
+                    "YieldStmt as a side effect of type annotation parsing.",
+                    span=self._get_span(node),
+                    hint="Use a pure index expression (constants, vars, arithmetic, pl.max/pl.min, ...).",
+                )
+            result = self._parse_expression(node)
+            # Backstop: the delegated parser may still return non-Expr (e.g. None)
+            # or non-index expressions (e.g. pl.tile.create(...) returns a Tile).
+            # The C++ TileView contract is index expressions only.
+            if not isinstance(result, ir.Expr) or not _is_index_expr_type(result.type):
+                got = type(result).__name__ if not isinstance(result, ir.Expr) else type(result.type).__name__
+                raise ParserTypeError(
+                    f"TileView field must be an index expression, got {got}: {ast.unparse(node)}",
+                    span=self._get_span(node),
+                    hint=(
+                        "Use integer literals, dynamic variables, or arithmetic over them "
+                        "(pl.max, pl.min, +, -, *, ...)"
+                    ),
+                )
+            return result
         raise ParserTypeError(
-            f"TileView expression must be an integer constant, got: {ast.unparse(node)}",
+            f"TileView expression must be an integer constant or bare variable, got: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use an integer literal for TileView fields",
+            hint="Standalone TypeResolver only handles integer literals and bare names; "
+            "richer expressions require the resolver to be wired into an ASTParser.",
         )
 
     def _resolve_tilelayout(self, node: ast.expr) -> "ir.TileLayout":

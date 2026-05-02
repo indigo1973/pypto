@@ -226,6 +226,91 @@ class TestTypeResolver:
 
         assert ir.python_print_type(reparsed) == printed
 
+    def test_tileview_field_accepts_arbitrary_expression(self):
+        """TileView fields must accept the same expressions ir.TileView accepts in C++.
+
+        Passes such as SplitVectorKernel produce TileViews whose ``valid_shape`` is
+        a non-constant expression (e.g. ``pl.max(pl.min(rows - i * 8, 8), 0)``).
+        The printer emits the expression verbatim, so the parser must round-trip
+        it. The TypeResolver delegates richer index expressions to the enclosing
+        parser's ``parse_expression``; here we stub that callback to confirm the
+        delegation happens.
+        """
+        sentinel = ir.ConstInt(99, DataType.INDEX, ir.Span.unknown())
+
+        def fake_parse_expression(_node: ast.expr) -> ir.Expr:
+            return sentinel
+
+        ev = ExprEvaluator(closure_vars={})
+        resolver = TypeResolver(expr_evaluator=ev, parse_expression=fake_parse_expression)
+
+        annotation = (
+            "pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, "
+            "pl.TileView(valid_shape=[pl.max(pl.min(rows - i * 8, 8), 0), 128])]"
+        )
+        resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
+        assert isinstance(resolved, ir.TileType)
+        assert resolved.tile_view is not None
+        valid_shape = resolved.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        # First element is the complex expression — delegated to the callback.
+        assert valid_shape[0] is sentinel
+        # Second element is a plain int constant — handled by the fast path.
+        assert isinstance(valid_shape[1], ir.ConstInt)
+        assert valid_shape[1].value == 128
+
+    def test_tileview_field_rejects_complex_expr_without_callback(self):
+        """Standalone TypeResolver still surfaces a clear error for non-trivial fields.
+
+        Without a ``parse_expression`` callback (e.g. unit-test or tooling usage),
+        TypeResolver cannot parse arbitrary index expressions and must report so.
+        """
+        resolver = _make_resolver()  # no parse_expression callback
+
+        annotation = "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[i + 1])]"
+        with pytest.raises(ParserTypeError, match="integer constant or bare variable"):
+            resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
+    def test_tileview_field_rejects_pl_yield_pre_flight(self):
+        """``pl.yield_()`` is rejected before the delegated parser is even called.
+
+        ``parse_yield_call`` emits an ``ir.YieldStmt`` to the builder as a side
+        effect of expression parsing. Type-annotation parsing must stay pure,
+        so the AST shape is checked up front and rejected before delegation.
+        """
+        sentinel_expr = ir.ConstInt(0, DataType.INDEX, ir.Span.unknown())
+
+        def fake_parse_expression(_node: ast.expr) -> ir.Expr:
+            # Returning a valid Expr makes any leak through pre-flight visible
+            # as a missing-error test failure rather than a swallowed exception.
+            return sentinel_expr
+
+        ev = ExprEvaluator(closure_vars={})
+        resolver = TypeResolver(expr_evaluator=ev, parse_expression=fake_parse_expression)
+        annotation = "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.yield_()])]"
+        with pytest.raises(ParserTypeError, match="cannot contain pl.yield_"):
+            resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
+    def test_tileview_field_rejects_non_index_typed_callback_result(self):
+        """Backstop: callback returning a non-index expression is rejected.
+
+        ``pl.tile.create(...)`` returns a Tile-typed expression; downstream
+        code relies on TileView fields being integer/index scalars. The
+        validator catches the type mismatch with a clear error rather than
+        letting malformed IR slip through.
+        """
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32, None, None, None)
+        tile_typed = ir.Var("t", tile_type, span)
+        ev = ExprEvaluator(closure_vars={})
+        resolver = TypeResolver(expr_evaluator=ev, parse_expression=lambda _node: tile_typed)
+        annotation = (
+            "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.tile.create([16], pl.FP32)])]"
+        )
+        with pytest.raises(ParserTypeError, match="must be an index expression"):
+            resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
 
 class TestTupleTypeResolver:
     """Tests for tuple[T1, T2, ...] return type resolution."""
