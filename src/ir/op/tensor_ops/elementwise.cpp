@@ -177,5 +177,21 @@ REGISTER_OP("tensor.maximum")
       return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.maximum");
     });
 
+REGISTER_OP("tensor.cmp")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise comparison of tensor and tensor or scalar (returns 0/1 tensor)")
+    .add_argument("lhs", "Left-hand side tensor (TensorType)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType) or scalar (ScalarType)")
+    .set_attr<int>("cmp_type")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "The operator tensor.cmp requires exactly 2 arguments, but got "
+                              << args.size();
+      if (As<TensorType>(args[1]->GetType())) {
+        return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp");
+      }
+      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp");
+    });
+
 }  // namespace ir
 }  // namespace pypto
