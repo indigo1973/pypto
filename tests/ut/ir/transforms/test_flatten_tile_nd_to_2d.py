@@ -1715,5 +1715,122 @@ class TestNdTensorMatmulConversion:
         assert names_flatten.count("tile.matmul_acc") == 1
 
 
+# ----------------------------------------------------------------------------
+# Regression coverage for #1278 — TileType memory_space presence mismatch on
+# print/parse roundtrip after auto-flatten of a Mat tile.load.
+#
+# Why CI didn't catch the original issue:
+#   The bug requires a rank>2 ``tile.load`` with ``target_memory=Mat`` whose
+#   result is NOT exclusively consumed by ``tile.batch_matmul[_acc]``. When the
+#   var is in ``batch_matmul_only_vars`` (every existing test's pattern), the
+#   ``FlattenTileNdTo2D`` pass skips Form A construction and lets Strategy 1
+#   reconstruct per-batch loads instead. Layered on top of that,
+#   ``OpRegistry::Create`` already backfills ``memory_space`` from the
+#   ``target_memory`` kwarg via ``set_output_memory_from_kwarg``
+#   (issue #553's fix), so even when Form A fires it reads a coherent
+#   ``result_tile->memory_space_``. The dormant scenario surfaces only when a
+#   future pass / IRBuilder bypasses ``OpRegistry::Create`` for tile.load
+#   construction.
+#
+# The tests below close the structural coverage gap. Both go through the
+# public ``OpRegistry::Create`` path and so cannot probe the deducer in
+# isolation — they assert the end-to-end invariant (target_memory in,
+# coherent canonical TileType out) and exercise the previously-uncovered
+# Form A construction in ``FlattenTileNdTo2D`` under the autouse
+# ``RoundtripInstrument``.
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DMatLoadRoundtrip:
+    """Layered regression coverage for #1278."""
+
+    @pytest.mark.parametrize(
+        "target_memory",
+        [pl.Mem.Mat, pl.Mem.Vec],
+    )
+    def test_tile_load_emits_coherent_memory_space(self, target_memory):
+        """``tile.load`` result type's ``memory_space`` must match ``target_memory``.
+
+        End-to-end op-creation invariant. The call goes through
+        ``tile_ops.load`` -> ``ir.create_op_call`` -> ``OpRegistry::Create``,
+        so it exercises the full public construction path. Two layers protect
+        this invariant: ``DeduceTileLoadType`` (passes ``target_memory_opt``
+        into the ``TileType`` constructor) and ``OpRegistry::Create``'s
+        ``set_output_memory_from_kwarg`` backfill. Either alone is sufficient
+        for the assertion to hold, so this test fires only if BOTH layers
+        regress simultaneously — the deducer self-consistency invariant
+        cannot be probed in isolation through this Python entry point.
+        """
+        x_var = ir.Var("x", ir.TensorType([16, 128], DataType.FP16), ir.Span.unknown())
+        call = tile_ops.load(x_var, [0, 0], [16, 128], target_memory=target_memory)
+        result = cast(ir.TileType, call.type)
+        assert result.memory_space == target_memory
+        # Canonical encoding: the implicit Mat-style / Vec-style tile_view
+        # collapses to None. Any future change that lets the explicit Mat
+        # tile_view linger here would re-introduce the asymmetry between
+        # what the printer emits (annotation only) and what the re-parser
+        # rebuilds (explicit tile_view).
+        assert result.tile_view is None
+
+    def test_rank3_mat_load_consumed_by_move_roundtrips(self):
+        """Rank-3 Mat ``tile.load`` -> ``tile.move`` exercises the Form A path.
+
+        The autouse ``pass_verification_context`` fixture (see
+        ``tests/ut/conftest.py``) wraps every pass execution with
+        ``RoundtripInstrument``, which prints the post-pass IR, re-parses it,
+        and asserts structural equality. ``tile.move`` (rather than
+        ``tile.batch_matmul``) keeps ``x_mat`` out of
+        ``batch_matmul_only_vars`` so the rank>2 Form A construction at
+        ``flatten_tile_nd_to_2d_pass.cpp:1523-1526`` is the active branch — the
+        scenario the issue reports.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 16, 128], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[1, 16, 128], pl.FP16]],
+            ) -> pl.Tensor[[1, 16, 128], pl.FP16]:
+                x_mat = pl.tile.load(x, [0, 0, 0], [1, 16, 128], target_memory=pl.Mem.Mat)
+                x_left = pl.tile.move(x_mat, target_memory=pl.Mem.Left)
+                out_0 = pl.tile.store(x_left, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 16, 128], pl.FP16]) -> pl.Tensor[[1, 16, 128], pl.FP16]:
+                out_0 = pl.create_tensor([1, 16, 128], dtype=pl.FP16)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        # The autouse fixture supplies RoundtripInstrument; this call would
+        # raise ``[RoundtripInstrument] Structural equality failed after pass
+        # 'FlattenTileNdTo2D'`` if the post-pass IR did not round-trip.
+        After = passes.flatten_tile_nd_to_2d()(Before)
+
+        after_func = After.get_function("main_incore_0")
+        assert after_func is not None
+        body = cast(ir.SeqStmts, after_func.body)
+        flat_load = next(
+            stmt
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.load"
+        )
+        flat_var_type = cast(ir.TileType, flat_load.var.type)
+        flat_call_type = cast(ir.TileType, flat_load.value.type)
+
+        # Form A's flat_tile_type — both Var and Call must share the canonical
+        # 2D encoding for Mat (issue #1278 specifically reported this
+        # asymmetry on print/parse roundtrip).
+        assert flat_var_type.shape == [16, 128]
+        assert flat_var_type.memory_space == ir.MemorySpace.Mat
+        assert flat_var_type.tile_view is None
+        assert flat_call_type.memory_space == flat_var_type.memory_space
+        assert flat_call_type.tile_view == flat_var_type.tile_view
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
