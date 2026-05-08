@@ -72,7 +72,6 @@ def _tensor_type_init_wrapper(
         tensor_view: Optional tensor view information
     """
     shape_exprs = _normalize_shape(shape)
-    # Always pass all 4 arguments to native constructor (memref and tensor_view can be None)
     _native_tensor_type_init(self, shape_exprs, dtype, memref, tensor_view)
 
 

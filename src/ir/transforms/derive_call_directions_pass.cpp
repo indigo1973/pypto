@@ -9,7 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -650,6 +653,25 @@ class CallDirectionMutator : public IRMutator {
         // Default: first writer, no sequential ancestor, no InOut declaration → OutputExisting.
         dirs.push_back(ArgDirection::OutputExisting);
       }
+    }
+
+    // Apply user-specified per-arg overrides (e.g. pl.no_dep(...) at call site).
+    // Stored as a vector<int32_t> of arg indices that should resolve to NoDep,
+    // overriding the auto-derived direction at those slots.
+    for (const auto& [k, v] : call->attrs_) {
+      if (k != kAttrArgDirectionOverrides) continue;
+      const auto* indices = std::any_cast<std::vector<int32_t>>(&v);
+      if (!indices) {
+        INTERNAL_CHECK_SPAN(false, call->span_)
+            << "Internal error: " << kAttrArgDirectionOverrides << " attr must hold std::vector<int32_t>";
+      }
+      for (int32_t idx : *indices) {
+        INTERNAL_CHECK_SPAN(idx >= 0 && static_cast<size_t>(idx) < dirs.size(), call->span_)
+            << "Internal error: arg_direction_overrides index " << idx << " out of range for call to '"
+            << call->op_->name_ << "' (args size " << call->args_.size() << ")";
+        dirs[static_cast<size_t>(idx)] = ArgDirection::NoDep;
+      }
+      break;
     }
 
     // Skip rewriting if directions are unchanged.

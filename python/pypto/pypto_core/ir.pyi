@@ -1890,6 +1890,9 @@ class ScopeKind(enum.Enum):
     Spmd = 4
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
+    Runtime = 5
+    """Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)."""
+
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
 
@@ -2002,6 +2005,29 @@ class SpmdScopeStmt(ScopeStmt):
         Accepts either a Python ``int`` (auto-wrapped as ``ConstInt``) or any
         ``Expr`` of integer type.
         """
+
+class RuntimeScopeStmt(ScopeStmt):
+    """Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+
+    The ``manual`` flag picks between two emission modes:
+      - ``manual=False`` → ``PTO2_SCOPE() { ... }`` (auto-dep via TensorMap)
+      - ``manual=True``  → ``PTO2_SCOPE(PTO2ScopeMode::MANUAL) { ... }``
+        (no auto-dep; compiler emits explicit ``add_dep`` from SSA data flow
+        plus user-supplied ``deps=[...]`` on each kernel call)
+    """
+
+    manual: Final[bool]
+    """True = MANUAL scope; False = AUTO scope (default)."""
+
+    def __init__(
+        self,
+        manual: bool = False,
+        name_hint: str = "",
+        *,
+        body: Stmt,
+        span: Span,
+    ) -> None:
+        """Create a Runtime scope statement."""
 
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""
@@ -2802,6 +2828,7 @@ class IRBuilder:
         name_hint: str = "",
         core_num: Expr | None = None,
         sync_start: bool | None = None,
+        manual: bool | None = None,
     ) -> None:
         """Begin building a scope statement.
 
@@ -2814,6 +2841,8 @@ class IRBuilder:
             name_hint: User-provided scope name hint (default: empty, auto-generated)
             core_num: SPMD block count expression (default: None)
             sync_start: Require sync-start for SPMD dispatch (default: None)
+            manual: Required for ``ScopeKind.Runtime`` — selects manual vs.
+                auto dependency tracking. Must be None for other scope kinds.
         """
 
     def end_scope(self, end_span: Span) -> ScopeStmt:
@@ -3348,6 +3377,7 @@ class IRVisitor:
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
+    def visit_runtime_scope_stmt(self, op: RuntimeScopeStmt) -> None: ...
     def visit_seq_stmts(self, op: SeqStmts) -> None: ...
     def visit_yield_stmt(self, op: YieldStmt) -> None: ...
     def visit_return_stmt(self, op: ReturnStmt) -> None: ...
@@ -3426,6 +3456,7 @@ class IRMutator:
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
+    def visit_runtime_scope_stmt(self, op: RuntimeScopeStmt) -> Stmt: ...
     def visit_seq_stmts(self, op: SeqStmts) -> Stmt: ...
     def visit_yield_stmt(self, op: YieldStmt) -> Stmt: ...
     def visit_return_stmt(self, op: ReturnStmt) -> Stmt: ...

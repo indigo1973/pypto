@@ -38,15 +38,20 @@ class TensorMeta(type):
 
     def __getitem__(cls, item: tuple) -> "Tensor":
         """Enable Tensor[[shape], dtype], Tensor[[shape], dtype, layout_or_memref],
-        and Tensor[[shape], dtype, layout, memref] syntax.
+        and Tensor[[shape], dtype, layout, memref] notation.
 
         Args:
-            item: Tuple of 2, 3, or 4 elements
+            item: Tuple of 2, 3, or 4 elements.
 
         Returns:
-            Tensor instance with shape, dtype, and optional layout/memref
+            Tensor instance with shape, dtype, optional layout/memref.
         """
-        if not isinstance(item, tuple) or len(item) not in (2, 3, 4):
+        if not isinstance(item, tuple):
+            raise TypeError(
+                "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
+                "or [shape, dtype, layout, memref] notation"
+            )
+        if len(item) not in (2, 3, 4):
             raise TypeError(
                 "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
                 "or [shape, dtype, layout, memref] notation"
@@ -54,7 +59,13 @@ class TensorMeta(type):
 
         if len(item) == 4:
             shape, dtype, layout, memref = item
-            return cls(shape, dtype, layout=layout, memref=memref, _annotation_only=True)
+            return cls(
+                shape,
+                dtype,
+                layout=layout,
+                memref=memref,
+                _annotation_only=True,
+            )
         if len(item) == 3:
             shape, dtype, third = item
             if isinstance(third, MemRef):
@@ -125,7 +136,10 @@ class TensorMeta(type):
         if dtype is not None and expr is None and not annotation_only:
             annotation_only = True
 
-        return cast("Tensor", type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only))
+        return cast(
+            "Tensor",
+            type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only),
+        )
 
 
 class Tensor(metaclass=TensorMeta):

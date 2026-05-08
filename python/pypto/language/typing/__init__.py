@@ -30,4 +30,15 @@ from pypto.pypto_core.ir import Expr
 IntLike: TypeAlias = int | Scalar | Expr
 """Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
 
-__all__ = ["DynVar", "InOut", "IntLike", "MemRef", "Out", "Scalar", "Tensor", "Tile", "Tuple", "dynamic"]
+__all__ = [
+    "DynVar",
+    "InOut",
+    "IntLike",
+    "MemRef",
+    "Out",
+    "Scalar",
+    "Tensor",
+    "Tile",
+    "Tuple",
+    "dynamic",
+]

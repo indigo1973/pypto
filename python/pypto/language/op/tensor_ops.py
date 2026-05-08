@@ -20,6 +20,7 @@ from typing import Any, overload
 __all__ = [
     "create_tensor",
     "create",
+    "no_dep",
     "read",
     "write",
     "dim",
@@ -107,10 +108,10 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        manual_dep: When True, the tensor opts out of automatic dependency
-            tracking by codegen (used internally for orchestrator-injected
-            workspace buffers like the GM pipe buffer). Most user code should
-            leave this as False.
+        manual_dep: **Internal-only.** Set by ``InjectGMPipeBuffer`` for the
+            scratch buffers it injects. User code should never set this —
+            order kernel calls explicitly with ``pl.no_dep(...)`` or wrap
+            them in ``with pl.manual_scope():`` instead.
 
     Returns:
         Tensor wrapping the create operation
@@ -120,6 +121,37 @@ def create(
 
 
 create_tensor = create
+
+
+def no_dep(tensor: Tensor) -> Tensor:
+    """Mark a kernel-call argument as no-dependency (caller-site override).
+
+    This is a parser-recognized marker — at runtime it returns the wrapped
+    tensor unchanged. The parser detects ``pl.no_dep(t)`` at kernel call
+    arg positions and threads the per-arg ``ArgDirection.NoDep`` override
+    into the IR Call's attrs. ``DeriveCallDirections`` then overwrites the
+    auto-derived direction at that slot to NoDep.
+
+    Effect at runtime: the simpler runtime skips the OverlapMap dependency
+    lookup for this argument (creator retention only). Use when ordering
+    is guaranteed by other means and you want to avoid unnecessary
+    serialization that auto-dep would otherwise insert.
+
+    Only valid as a direct argument to a kernel call::
+
+        result = self.my_kernel(pl.no_dep(shared_input), output)
+
+    Outside a kernel call argument list it is a no-op (returns ``tensor``
+    unchanged); the parser only injects the override at recognized call
+    sites.
+
+    Args:
+        tensor: The tensor to pass through. Must be a ``Tensor`` value.
+
+    Returns:
+        The tensor unchanged. The marker is consumed at parse time.
+    """
+    return tensor
 
 
 def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:

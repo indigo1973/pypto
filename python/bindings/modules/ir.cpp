@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -143,17 +144,50 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
-      // Lists/tuples currently only used to carry `vector<ArgDirection>` (e.g. attrs["arg_directions"]).
-      // Reject non-ArgDirection sequences to avoid silently dropping metadata.
-      std::vector<ArgDirection> dirs;
-      for (auto elem : nb::cast<nb::sequence>(item.second)) {
-        if (!nb::isinstance<ArgDirection>(elem)) {
-          throw pypto::TypeError("Unsupported list element type for key: " + key +
-                                 " (expected ArgDirection)");
+      // Lists/tuples carry exactly one element type, dispatched by attr key:
+      //   - kAttrArgDirections          -> vector<ArgDirection>
+      //   - kAttrArgDirectionOverrides  -> vector<int32_t>
+      //   - kAttrManualDepEdges /
+      //     kAttrUserManualDepEdges     -> vector<VarPtr>
+      // Inferring from the first element would silently accept mismatched
+      // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
+      // instead of raising at parse time.
+      auto seq = nb::cast<nb::sequence>(item.second);
+      if (key == kAttrArgDirectionOverrides) {
+        std::vector<int32_t> idxs;
+        for (auto elem : seq) {
+          if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key + " (expected int)");
+          }
+          int64_t v = nb::cast<int64_t>(elem);
+          if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max()) {
+            throw pypto::ValueError("List value " + std::to_string(v) + " for key: " + key +
+                                    " is out of int32 range");
+          }
+          idxs.push_back(static_cast<int32_t>(v));
         }
-        dirs.push_back(nb::cast<ArgDirection>(elem));
+        kwargs.emplace_back(key, std::move(idxs));
+      } else if (key == kAttrManualDepEdges || key == kAttrUserManualDepEdges) {
+        std::vector<VarPtr> vars;
+        for (auto elem : seq) {
+          if (!nb::isinstance<Var>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key + " (expected Var)");
+          }
+          vars.push_back(nb::cast<VarPtr>(elem));
+        }
+        kwargs.emplace_back(key, std::move(vars));
+      } else {
+        // Default: kAttrArgDirections and any future ArgDirection list key.
+        std::vector<ArgDirection> dirs;
+        for (auto elem : seq) {
+          if (!nb::isinstance<ArgDirection>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected ArgDirection)");
+          }
+          dirs.push_back(nb::cast<ArgDirection>(elem));
+        }
+        kwargs.emplace_back(key, std::move(dirs));
       }
-      kwargs.emplace_back(key, std::move(dirs));
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
     }
@@ -719,6 +753,24 @@ void BindIR(nb::module_& m) {
           lst.append(nb::cast(d));
         }
         result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<int32_t>)) {
+        // Used by attrs["arg_direction_overrides"] (per-arg NoDep override
+        // indices). Surface as a Python list[int] so attribute readback
+        // round-trips through the binding.
+        const auto& idxs = AnyCast<std::vector<int32_t>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (auto i : idxs) {
+          lst.append(nb::cast(i));
+        }
+        result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<VarPtr>)) {
+        // Used by attrs["manual_dep_edges"] / attrs["user_manual_dep_edges"].
+        const auto& vars = AnyCast<std::vector<VarPtr>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (const auto& v : vars) {
+          lst.append(nb::cast(v));
+        }
+        result[key.c_str()] = lst;
       }
     }
     return result;
@@ -1032,6 +1084,7 @@ void BindIR(nb::module_& m) {
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
+      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (PTO2_SCOPE wrapper)")
       .export_values();
 
   // SplitMode enum
@@ -1100,6 +1153,16 @@ void BindIR(nb::module_& m) {
       nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "", nb::arg("body"),
       nb::arg("span"), "Create an SPMD scope statement (int core_num is wrapped as ConstInt)");
   BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);
+
+  // RuntimeScopeStmt
+  auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
+      ir, "RuntimeScopeStmt",
+      "Runtime orchestration scope: emits PTO2_SCOPE() (manual=False) or "
+      "PTO2_SCOPE(PTO2ScopeMode::MANUAL) (manual=True) wrappers in codegen");
+  runtime_scope_stmt_class.def(nb::init<bool, std::string, const StmtPtr&, const Span&>(),
+                               nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
+                               nb::arg("span"), "Create a Runtime scope statement");
+  BindFields<RuntimeScopeStmt>(runtime_scope_stmt_class);
 
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =

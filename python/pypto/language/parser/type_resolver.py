@@ -355,7 +355,7 @@ class TypeResolver:
         if type_name == "Tuple":
             return self._resolve_tuple_subscript_type(subscript_node)
 
-        # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref]
+        # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref].
         # Tile: [shape, dtype] plus any ordering of TileView/MemRef/MemorySpace,
         # with the constraint that MemRef requires explicit MemorySpace.
         valid_counts = (2, 3, 4) if type_name == "Tensor" else (2, 3, 4, 5)
@@ -397,7 +397,7 @@ class TypeResolver:
         if n_elts == 2:
             if type_name == "Tile":
                 return ir.TileType(shape, dtype)
-            return ir.TensorType(shape, dtype)
+            return ir.TensorType(shape, dtype, None, None)
 
         if type_name == "Tile":
             return self._resolve_tile_annotation_args(shape, dtype, list(slice_value.elts[2:]))
@@ -407,7 +407,7 @@ class TypeResolver:
             third = slice_value.elts[2]
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
-                return ir.TensorType(shape, dtype, memref)
+                return ir.TensorType(shape, dtype, memref, None)
             if self._is_tensorview_node(third):
                 tensor_view = self._resolve_tensorview(third)
                 return ir.TensorType(shape, dtype, None, tensor_view)

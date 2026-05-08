@@ -11,7 +11,9 @@
 
 #include "pypto/ir/transforms/base/visitor.h"
 
+#include <any>
 #include <cstddef>
+#include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -74,6 +76,17 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   for (size_t i = 0; i < op->args_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
     VisitExpr(op->args_[i]);
+  }
+  // Var-typed attrs (manual_dep_edges family) reference Vars defined elsewhere
+  // in the IR. Treat them as real uses so analyses such as the unused-variable
+  // check don't flag a Var that is referenced only via ``deps=[var]``.
+  for (const auto& [k, v] : op->attrs_) {
+    if (k != kAttrUserManualDepEdges && k != kAttrManualDepEdges) continue;
+    const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+    if (!edges) continue;
+    for (const auto& e : *edges) {
+      if (e) VisitExpr(e);
+    }
   }
 }
 
@@ -237,6 +250,11 @@ void IRVisitor::VisitStmt_(const SpmdScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->core_num_, op->span_) << "SpmdScopeStmt has null core_num";
   VisitExpr(op->core_num_);
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "SpmdScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const RuntimeScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "RuntimeScopeStmt has null body";
   VisitStmt(op->body_);
 }
 
