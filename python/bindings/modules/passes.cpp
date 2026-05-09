@@ -85,7 +85,9 @@ void BindPass(nb::module_& m) {
       .value("InlineFunctionsEliminated", IRProperty::InlineFunctionsEliminated,
              "No FunctionType::Inline functions or Calls to them remain")
       .value("OrchestrationReferencesResolved", IRProperty::OrchestrationReferencesResolved,
-             "Every non-builtin Call in an Orchestration function targets a Function in the Program");
+             "Every non-builtin Call in an Orchestration function targets a Function in the Program")
+      .value("TensorViewCanonical", IRProperty::TensorViewCanonical,
+             "Every TensorType.tensor_view_ is canonical per RFC #1300 §2.2");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -422,6 +424,13 @@ void BindPass(nb::module_& m) {
              "is a function parameter and annotates that parameter's TensorType with the DN\n"
              "(column-major) layout. The shape is preserved -- DN is a codegen hint only.\n"
              "Orchestration and Opaque functions are returned unchanged.");
+  passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
+             "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
+             "Walks every TensorType reachable from the program and rewrites any\n"
+             "(view.has_value() && view.stride.empty()) slot to its packed canonical\n"
+             "stride per BuildLogicalStridesFromLayout. Bare TensorTypes are left\n"
+             "untouched. Idempotent. Produces TensorViewCanonical so the registry\n"
+             "auto-verifies after the pass runs.");
   passes.def("resolve_backend_op_layouts", &pass::ResolveBackendOpLayouts,
              "Create a pass that repairs backend-required layouts for constrained elementwise tile ops\n\n"
              "Repairs `[N,1]` col-major vector inputs at constrained use-sites by reshaping them\n"
@@ -504,6 +513,22 @@ void BindPass(nb::module_& m) {
   passes.def("get_default_verify_properties", &GetDefaultVerifyProperties,
              "Get default property set for explicit verification");
   passes.def("get_structural_properties", &GetStructuralProperties, "Get structural invariant properties");
+
+  // Direct entry point for the TensorViewCanonical verifier (RFC #1300 P2).
+  // Lets tests / debugging tools toggle strict (post-MaterializeTensorStrides)
+  // mode without depending on the registry's default weak-mode wiring.
+  passes.def(
+      "verify_tensor_view_canonical",
+      [](const ProgramPtr& program, bool require_materialized) {
+        std::vector<Diagnostic> diagnostics;
+        auto verifier = CreateTensorViewCanonicalPropertyVerifier(require_materialized);
+        verifier->Verify(program, diagnostics);
+        return diagnostics;
+      },
+      nb::arg("program"), nb::arg("require_materialized") = false,
+      "Run the TensorViewCanonical verifier directly. require_materialized=False (default) "
+      "is the weak mode (empty stride accepted as implicitly packed canonical); "
+      "require_materialized=True is the strict codegen-entry contract.");
 
   // Bind RunVerifier factory function
   passes.def(

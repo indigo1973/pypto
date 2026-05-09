@@ -148,6 +148,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/legalize_pto_buffer_reuse_pass.cpp
+    src/ir/transforms/materialize_tensor_strides_pass.cpp
     src/ir/transforms/ir_property.cpp
     src/ir/transforms/mutator.cpp
     src/ir/transforms/normalize_stmt_structure_pass.cpp
@@ -211,6 +212,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/verify_orchestration_references.cpp
+    src/ir/verifier/verify_tensor_view_canonical.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/perf_hint_tile_innermost_dim.cpp
