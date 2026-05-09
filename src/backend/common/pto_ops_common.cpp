@@ -2043,7 +2043,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
-    {"tile.move",            "pto.tmov",             1},
+    // tile.move has custom codegen (no-op elision for same-space same-address moves)
     {"tile.move_fp",         "pto.tmov.fp",          2},
     // tile.transpose has custom codegen (MakeTileTransposeCodegenPTO): pto.ttrans needs
     // ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch workspace tile, NOT
@@ -2106,6 +2106,42 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg_i64_to_index_op("tile.get_subblock_idx", "pto.get_subblock_idx");
   reg_i64_to_index_op("tile.get_block_num", "pto.get_block_num");
   reg_i64_to_index_op("tile.get_block_idx", "pto.get_block_idx");
+
+  // tile.move → pto.tmov with no-op elision.
+  // When MemoryReuse inserts a tile.move between two MemRefs that end up at the
+  // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
+  // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
+  // unsupported same-space address pairs (fixes #1310).
+  reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
+
+    auto src_var = AsVarLike(op->args_[0]);
+    auto dst_var = codegen.GetCurrentResultVar();
+    if (src_var && dst_var) {
+      auto src_tile = As<ir::TileType>(src_var->GetType());
+      auto dst_tile = As<ir::TileType>(dst_var->GetType());
+      if (src_tile && dst_tile && src_tile->memref_.has_value() && dst_tile->memref_.has_value()) {
+        auto src_space = src_tile->GetMemorySpace();
+        auto dst_space = dst_tile->GetMemorySpace();
+        if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
+          auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
+          auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
+          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
+            // Alias the destination to the source SSA value so downstream
+            // references use the source's defined buffer, not the destination's
+            // alloc_tile (which would be unwritten after eliding the tmov).
+            codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
+            return std::string("");  // no-op: same space, same address
+          }
+        }
+      }
+    }
+
+    codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+    return std::string("");
+  });
+
   reg("tile.read", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileReadCodegenPTO(op, codegen);
   });

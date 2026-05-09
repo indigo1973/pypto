@@ -1605,5 +1605,86 @@ class TestTileScatterUpdateCodegen:
         assert "rows=32, cols=32" in mlir, f"Expected original dst tile shape in MLIR:\n{mlir}"
 
 
+class TestTileMoveAccNoopElision:
+    """Regression test for #1310: pto.tmov acc→acc must be elided.
+
+    When AutoTileMatmulL0 rewrites matmul_acc into an inner K-loop, the fresh
+    IterArg Vars carry different MemRef bases than the outer loop's accumulator.
+    MemoryReuse's YieldFixupMutator inserts tile.move(target_memory=Acc) for
+    these, but after AllocateMemoryAddr both sides share the same physical Acc
+    address. Codegen must elide the no-op pto.tmov to avoid the unsupported
+    acc→acc address-space pair on Ascend 910B.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
+        single = ir.Program([target], target.name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @staticmethod
+    def _has_acc_to_acc_tmov(mlir: str) -> bool:
+        """Check if MLIR contains pto.tmov where both ins and outs are loc=acc."""
+        for line in mlir.splitlines():
+            stripped = line.strip()
+            if "pto.tmov" not in stripped:
+                continue
+            ins_part = stripped.split("ins(", 1)
+            outs_part = stripped.split("outs(", 1)
+            if len(ins_part) < 2 or len(outs_part) < 2:
+                continue
+            ins_clause = ins_part[1].split(")", 1)[0]
+            outs_clause = outs_part[1].split(")", 1)[0]
+            if "loc=acc" in ins_clause and "loc=acc" in outs_clause:
+                return True
+        return False
+
+    def test_matmul_acc_in_outer_loop_no_acc_to_acc_tmov(self):
+        """matmul_acc inside an outer accumulation loop must not produce pto.tmov acc→acc.
+
+        K=512 exceeds L0 capacity (256 for BF16), so AutoTileMatmulL0 rewrites
+        each matmul into an inner K-loop with fresh IterArg Vars. MemoryReuse's
+        YieldFixupMutator may insert tile.move acc→acc when the inner loop's
+        yield MemRef has a different base_ pointer than the outer iter-arg init.
+        The codegen must elide this no-op move.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 1024], pl.BF16],
+                w: pl.Tensor[[1024, 64], pl.BF16],
+                dst: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                # First block: K=512, triggers AutoTileMatmulL0 (K > 256)
+                x0 = pl.load(x, [0, 0], [16, 512], target_memory=pl.MemorySpace.Mat)
+                w0 = pl.load(w, [0, 0], [512, 64], target_memory=pl.MemorySpace.Mat)
+                x0_left = pl.move(x0, target_memory=pl.MemorySpace.Left)
+                w0_right = pl.move(w0, target_memory=pl.MemorySpace.Right)
+                acc: pl.Tile[[16, 64], pl.FP32] = pl.matmul(x0_left, w0_right)
+                # Second block: matmul_acc accumulating into the same Acc tile
+                x1 = pl.load(x, [0, 512], [16, 512], target_memory=pl.MemorySpace.Mat)
+                w1 = pl.load(w, [512, 0], [512, 64], target_memory=pl.MemorySpace.Mat)
+                x1_left = pl.move(x1, target_memory=pl.MemorySpace.Left)
+                w1_right = pl.move(w1, target_memory=pl.MemorySpace.Right)
+                acc2: pl.Tile[[16, 64], pl.FP32] = pl.matmul_acc(acc, x1_left, w1_right)
+                vec = pl.move(acc2, target_memory=pl.MemorySpace.Vec)
+                return pl.store(vec, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert not self._has_acc_to_acc_tmov(mlir), (
+            f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1310):\n{mlir}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
