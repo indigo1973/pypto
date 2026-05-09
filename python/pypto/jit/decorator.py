@@ -351,21 +351,21 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
     return result
 
 
-def _extract_call_args_for_dep(
-    entry_func: Any, dep_name: str
-) -> list[str | None] | list[tuple[str | None, str | None]] | None:
-    """Find the argument names passed to dep_name in entry_func's body.
+def _extract_call_args_for_dep(entry_func: Any, dep_name: str) -> list[tuple[str | None, str | None]] | None:
+    """Find the argument names passed to ``dep_name`` in ``entry_func``'s body.
 
-    Handles both positional and keyword calls:
-    - Positional: ``dep(a, b)`` → ``["a", "b"]``
-    - Keyword: ``dep(a=a, c=out)`` → ``{"a": "a", "c": "out"}`` stored as
-      positional list via dep's parameter order (returned as-is from keyword
-      keys/values here; caller zip handles ordering).
+    Returns a unified list of ``(param_name, arg_name)`` pairs:
 
-    Returns a list of argument name strings (None for non-name args like
-    literals), or None if the call is not found.
+    - ``param_name`` is ``None`` for a positional argument (the consumer
+      pairs it with the dep's parameter list by index) and the keyword
+      name for a keyword argument.
+    - ``arg_name`` is the caller-side variable name, or ``None`` for
+      non-``Name`` expressions (literals, attribute access, computed
+      expressions, …).
 
-    Only the first call site is examined.
+    Mixed calls like ``dep(a, out=out)`` are preserved correctly. Returns
+    ``None`` if no call site to ``dep_name`` is found. Only the first call
+    site is examined.
     """
     func_def = _get_func_def(entry_func)
     for node in ast.walk(func_def):
@@ -373,68 +373,83 @@ def _extract_call_args_for_dep(
             continue
         if not (isinstance(node.func, ast.Name) and node.func.id == dep_name):
             continue
-        # Positional args present: use them directly
-        if node.args:
-            return [arg.id if isinstance(arg, ast.Name) else None for arg in node.args]
-        # Keyword-only call: map dep param name → entry arg name
-        if node.keywords:
-            # Return as a dict encoded in a special sentinel list is complex;
-            # instead return a list of (kw.arg, entry_name) pairs via a dict.
-            # We signal keyword mode by returning a dict-like list of 2-tuples.
-            # Caller (_build_dep_context) handles both forms.
-            return [
-                (kw.arg, kw.value.id if isinstance(kw.value, ast.Name) else None)
-                for kw in node.keywords
-                if kw.arg is not None
-            ]
-        # Call with no args at all
-        return []
+        result: list[tuple[str | None, str | None]] = [
+            (None, arg.id if isinstance(arg, ast.Name) else None) for arg in node.args
+        ]
+        result.extend(
+            (kw.arg, kw.value.id if isinstance(kw.value, ast.Name) else None)
+            for kw in node.keywords
+            if kw.arg is not None  # skip **kwargs splats
+        )
+        return result
     return None
 
 
-def _propagate_dynamic_dims_from_deps(
+def _build_param_mapping(
+    dep_param_names: list[str],
+    call_args: list[tuple[str | None, str | None]],
+) -> dict[str, str | None]:
+    """Map dep parameter name → caller argument name from call-site args.
+
+    ``call_args`` is the unified form returned by
+    ``_extract_call_args_for_dep``: a list of ``(param_name, arg_name)``
+    pairs where ``param_name is None`` marks a positional argument (paired
+    with ``dep_param_names`` by index) and a string is a keyword name.
+    Mixed positional + keyword call sites collapse to the same dict.
+    """
+    mapping: dict[str, str | None] = {}
+    pos_idx = 0
+    for param_name, arg_name in call_args:
+        if param_name is None:
+            if pos_idx < len(dep_param_names):
+                mapping[dep_param_names[pos_idx]] = arg_name
+            pos_idx += 1
+        else:
+            mapping[param_name] = arg_name
+    return mapping
+
+
+def _compute_per_func_dynamic_dims(
     entry_func: Any,
     deps: list[Any],
     entry_dynamic_dims: set[tuple[str, int]],
-) -> set[tuple[str, int]]:
-    """Add to entry_dynamic_dims any dynamic dims that flow in from dep call sites.
+    callers_by_dep_id: dict[int, list[Any]],
+    dep_dyn_cache: dict[int, set[tuple[str, int]]],
+    call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+) -> dict[int, set[tuple[str, int]]]:
+    """Resolve dynamic dims for every reachable JIT function.
 
-    When a dep marks one of its params as dynamic (via bind_dynamic), and that
-    dep param is mapped to an entry param at the call site, the corresponding
-    entry param/dim pair should also be dynamic.
+    Each dep's own ``bind_dynamic`` calls seed its set, then leaf-first
+    propagation maps every dep param marked dynamic to the corresponding
+    arg at *every* recorded caller, so dyn dims hop through every
+    intermediate caller until reaching the entry. ``deps`` must be in
+    leaf-first topological order (as returned by ``_get_dep_graph``);
+    a single pass then suffices, even for diamonds where a shared dep is
+    reached from multiple branches.
 
-    Args:
-        entry_func: The entry JITFunction's underlying function.
-        deps: List of dep JITFunction objects.
-        entry_dynamic_dims: Dynamic dims already found in the entry function.
+    ``dep_dyn_cache`` and ``call_args_cache`` are the per-graph AST
+    memoisations from ``_get_dep_graph`` — passed in so this function
+    avoids re-walking ASTs on every JIT invocation.
 
-    Returns:
-        Augmented set of (param_name, dim_index) dynamic dim pairs for the entry.
+    Returns a dict keyed by ``id(py_func)`` so callers can pull either the
+    entry's set (cache key) or any individual dep's set (specialization).
     """
-    result = set(entry_dynamic_dims)
+    per_func: dict[int, set[tuple[str, int]]] = {id(entry_func): set(entry_dynamic_dims)}
     for dep in deps:
-        dep_param_names = dep._param_names()
-        dep_dynamic_dims = _scan_dynamic_dims(dep._func, dep_param_names)
-        if not dep_dynamic_dims:
-            continue
-        call_args = _extract_call_args_for_dep(entry_func, dep.__name__)
-        if call_args is None:
-            continue
-        if call_args and isinstance(call_args[0], tuple):
-            # Keyword mode: list of (dep_param, entry_arg) pairs
-            dep_param_to_entry: dict[str, str | None] = {
-                dep_param: entry_arg for dep_param, entry_arg in call_args
-            }
-        else:
-            # Positional mode
-            dep_param_to_entry = {
-                dep_param: entry_arg for dep_param, entry_arg in zip(dep_param_names, call_args)
-            }
-        for dep_param, dim_idx in dep_dynamic_dims:
-            entry_arg = dep_param_to_entry.get(dep_param)
-            if entry_arg is not None:
-                result.add((entry_arg, dim_idx))
-    return result
+        per_func[id(dep._func)] = set(dep_dyn_cache[id(dep._func)])
+    for dep in deps:
+        dep_dyn = per_func[id(dep._func)]
+        for caller_func in callers_by_dep_id.get(id(dep._func), ()):
+            call_args = call_args_cache[(id(caller_func), dep.__name__)]
+            if call_args is None:
+                continue
+            mapping = _build_param_mapping(dep._param_names(), call_args)
+            caller_set = per_func[id(caller_func)]
+            for dep_param, dim_idx in dep_dyn:
+                caller_arg = mapping.get(dep_param)
+                if caller_arg is not None:
+                    caller_set.add((caller_arg, dim_idx))
+    return per_func
 
 
 # ---------------------------------------------------------------------------
@@ -502,44 +517,96 @@ def _build_dynvar_bindings(contexts: list[SpecializeContext]) -> tuple[dict[str,
     return bindings, literals
 
 
-def _backfill_entry_dynvar_bindings(
-    entry_func: Any,
+def _backfill_dynvar_bindings(
     deps: list[Any],
+    callers_by_dep_id: dict[int, list[Any]],
     bindings: dict[str, str],
     literals: dict[str, str],
+    call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
 ) -> None:
-    """Add missing dynvar binding entries for the entry function's params.
+    """Cascade dynvar bindings up through the JIT call graph.
 
-    When dep functions use bind_dynamic but the entry function doesn't, the
-    entry params that are passed to dynamic dep params won't have entries in
-    ``bindings``.  This function adds them by reverse-mapping through the
-    call site: for each dep, for each dep param that has a binding, find the
-    entry param that maps to it and copy the binding.
+    When a dep declares ``param.bind_dynamic(dim, dynvar)`` but its caller
+    (which may itself be another dep) doesn't, the caller's arg passed to
+    that dep param must inherit the same binding so the generated tensor
+    annotation references the right DynVar. ``deps`` is leaf-first, so a
+    single pass cascades each binding from leaf -> mid -> ... -> entry,
+    visiting *every* recorded caller of each dep so diamond branches all
+    receive the same binding.
+
+    ``call_args_cache`` is the per-graph AST memoisation from
+    ``_get_dep_graph`` — avoids re-walking caller bodies on every JIT
+    invocation.
 
     Mutates ``bindings`` and ``literals`` in place.
     """
     for dep in deps:
-        dep_param_names = dep._param_names()
-        call_args = _extract_call_args_for_dep(entry_func, dep.__name__)
-        if call_args is None:
-            continue
-        if call_args and isinstance(call_args[0], tuple):
-            dep_to_entry: dict[str, str | None] = {dep_param: entry_arg for dep_param, entry_arg in call_args}
-        else:
-            dep_to_entry = {dep_param: entry_arg for dep_param, entry_arg in zip(dep_param_names, call_args)}
-        for dep_param, entry_arg in dep_to_entry.items():
-            if entry_arg is None:
+        for caller_func in callers_by_dep_id.get(id(dep._func), ()):
+            call_args = call_args_cache[(id(caller_func), dep.__name__)]
+            if call_args is None:
                 continue
-            # For each dim binding that dep_param has, copy to entry_arg
-            prefix = f"{dep_param}__"
-            for key, var_name in list(bindings.items()):
-                if key.startswith(prefix):
-                    dim_idx = key[len(prefix) :]
-                    entry_key = f"{entry_arg}__{dim_idx}"
-                    if entry_key not in bindings:
-                        bindings[entry_key] = var_name
-                        if var_name not in literals:
-                            literals[var_name] = var_name
+            mapping = _build_param_mapping(dep._param_names(), call_args)
+            for dep_param, caller_arg in mapping.items():
+                if caller_arg is None:
+                    continue
+                prefix = f"{dep_param}__"
+                for key, var_name in list(bindings.items()):
+                    if key.startswith(prefix):
+                        dim_idx = key[len(prefix) :]
+                        caller_key = f"{caller_arg}__{dim_idx}"
+                        if caller_key not in bindings:
+                            bindings[caller_key] = var_name
+                            if var_name not in literals:
+                                literals[var_name] = var_name
+
+
+def _resolve_dep_call_metadata(
+    dep: JITFunction,
+    caller_func: Any,
+    caller_tensor_meta: dict[str, TensorMeta],
+    caller_scalar_values: dict[str, int | float | bool],
+    caller_scalar_dtypes: dict[str, DataType],
+) -> tuple[
+    dict[str, TensorMeta],
+    dict[str, int | float | bool],
+    dict[str, DataType],
+]:
+    """Map ``dep``'s parameter names to TensorMeta / scalar metadata using
+    ``caller_func``'s call-site arguments.
+
+    The caller may be the entry function or another dep (transitive case);
+    in either case we look up the (first) ``dep(...)`` call site in
+    ``caller_func``'s body and apply the positional-or-keyword mapping.
+    Intermediate tensors created via ``pl.create_tensor`` in the caller are
+    folded into the metadata pool. Falls back to name-based matching when
+    call-site extraction fails.
+    """
+    dep_param_names = dep._param_names()
+    call_args = _extract_call_args_for_dep(caller_func, dep.__name__)
+    intermediate_metas = _extract_create_tensor_metas(caller_func)
+    all_tensor_meta = {**intermediate_metas, **caller_tensor_meta}
+
+    dep_tensor_meta: dict[str, TensorMeta] = {}
+    dep_scalar_values: dict[str, int | float | bool] = {}
+    dep_scalar_dtypes: dict[str, DataType] = {}
+
+    if call_args is not None:
+        for dep_param, caller_arg in _build_param_mapping(dep_param_names, call_args).items():
+            if caller_arg is None:
+                continue
+            if caller_arg in all_tensor_meta:
+                dep_tensor_meta[dep_param] = all_tensor_meta[caller_arg]
+            elif caller_arg in caller_scalar_values:
+                dep_scalar_values[dep_param] = caller_scalar_values[caller_arg]
+                if caller_arg in caller_scalar_dtypes:
+                    dep_scalar_dtypes[dep_param] = caller_scalar_dtypes[caller_arg]
+    else:
+        # Fallback: name-based matching against the caller's metadata pool.
+        dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
+        dep_scalar_values = {n: caller_scalar_values[n] for n in dep_param_names if n in caller_scalar_values}
+        dep_scalar_dtypes = {n: caller_scalar_dtypes[n] for n in dep_param_names if n in caller_scalar_dtypes}
+
+    return dep_tensor_meta, dep_scalar_values, dep_scalar_dtypes
 
 
 # ---------------------------------------------------------------------------
@@ -554,9 +621,11 @@ class JITFunction:
         _func: Original Python function.
         _func_type: 'orchestration' | 'incore' | 'inline' | 'opaque'.
         _level: pl.Level or None.
-        _deps: Lazily-discovered list of sub-function dependencies (any of
-            incore / inline / opaque).
-        _deps_discovered: Whether dep discovery has been performed.
+        _dep_graph: Lazily-computed transitive JIT dep graph rooted here —
+            ``(deps_topo, callers_by_dep_id, callees_by_func_id,
+            dep_dyn_cache, call_args_cache)``.  ``None`` until first
+            ``_get_dep_graph()`` call.  See that method for the tuple's
+            structure.
         _cache: L1 in-memory cache: CacheKey → CompiledProgram (post-pass ir.Program wrapped).
         _source_hash: Lazily-computed hash of func source + all dep sources.
     """
@@ -570,8 +639,16 @@ class JITFunction:
         self._func = func
         self._func_type = func_type or "orchestration"
         self._level = level
-        self._deps: list[JITFunction] = []
-        self._deps_discovered: bool = False
+        self._dep_graph: (
+            tuple[
+                list[JITFunction],
+                dict[int, list[Any]],
+                dict[int, list[str]],
+                dict[int, set[tuple[str, int]]],
+                dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+            ]
+            | None
+        ) = None
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
         self._source_hash: str | None = None
 
@@ -584,12 +661,95 @@ class JITFunction:
     # Lazy dep discovery
     # ------------------------------------------------------------------
 
+    def _get_dep_graph(
+        self,
+    ) -> tuple[
+        list[JITFunction],
+        dict[int, list[Any]],
+        dict[int, list[str]],
+        dict[int, set[tuple[str, int]]],
+        dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+    ]:
+        """Return the transitive JIT dep graph rooted at this function.
+
+        The graph is computed lazily on first access and cached for the
+        lifetime of this ``JITFunction``. Returns:
+
+        - ``deps_topo``: every reachable dep in leaf-first topological order
+          (deduplicated by underlying Python function identity). The entry
+          function is NOT included.
+        - ``callers_by_dep_id``: for each dep, the list of Python functions
+          whose bodies contain a call site to it. Recorded in DFS-discovery
+          order; deduplicated within each list. The entry has no caller and
+          does not appear as a key. In a diamond ``entry -> {A, B} -> shared``
+          both ``A`` and ``B`` appear as callers of ``shared`` so dynamic-dim
+          and dynvar propagation visits every branch.
+
+          Tensor / scalar metadata for a shared dep is still resolved
+          through the first-recorded caller — call sites in other branches
+          must agree on shapes/dtypes (otherwise one specialization would
+          have to differ from another, which the one-context-per-function
+          design doesn't support).
+        - ``callees_by_func_id``: for each function (entry + every reached
+          dep), the names of JIT deps it directly calls. Used to set each
+          context's ``dep_names`` so the body transformer rewrites nested
+          dep calls into the ``self.<dep>(...)`` form required by
+          multi-function ``@pl.program``.
+        - ``dep_dyn_cache``: ``id(dep._func)`` → set of ``(param, dim)``
+          pairs marked dynamic in that dep's body via ``bind_dynamic``.
+          Cached here so ``_compute_per_func_dynamic_dims`` doesn't
+          re-parse dep ASTs on every JIT invocation.
+        - ``call_args_cache``: ``(id(caller_func), dep_name)`` → unified
+          call-site arg list (see ``_extract_call_args_for_dep``) or
+          ``None`` if the call site isn't found. Cached so propagation
+          and dynvar back-fill don't re-walk caller ASTs on every call.
+        """
+        if self._dep_graph is None:
+            deps_topo: list[JITFunction] = []
+            seen: set[int] = set()
+            callers_by_dep_id: dict[int, list[Any]] = {}
+            callees_by_func_id: dict[int, list[str]] = {}
+            dep_dyn_cache: dict[int, set[tuple[str, int]]] = {}
+            call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None] = {}
+
+            def visit(func: Any) -> None:
+                direct = _discover_deps(func)
+                callees_by_func_id[id(func)] = [d.__name__ for d in direct]
+                for dep in direct:
+                    # Key everything off ``id(dep._func)`` (the underlying
+                    # Python function) — same key the downstream helpers
+                    # use, and stable across multiple wrapper objects for
+                    # the same source function.
+                    callers = callers_by_dep_id.setdefault(id(dep._func), [])
+                    if func not in callers:
+                        callers.append(func)
+                    # Memoise per-(caller, dep) call-site args once.
+                    cache_key = (id(func), dep.__name__)
+                    if cache_key not in call_args_cache:
+                        call_args_cache[cache_key] = _extract_call_args_for_dep(func, dep.__name__)
+                    if id(dep._func) in seen:
+                        continue
+                    # Mark before recursing — this also serves as a cycle
+                    # guard (a self-recursive JIT function is unsupported
+                    # but won't loop forever here).
+                    seen.add(id(dep._func))
+                    dep_dyn_cache[id(dep._func)] = _scan_dynamic_dims(dep._func, dep._param_names())
+                    visit(dep._func)
+                    deps_topo.append(dep)
+
+            visit(self._func)
+            self._dep_graph = (
+                deps_topo,
+                callers_by_dep_id,
+                callees_by_func_id,
+                dep_dyn_cache,
+                call_args_cache,
+            )
+        return self._dep_graph
+
     def _get_deps(self) -> list[JITFunction]:
-        """Return @pl.jit.incore deps called by this function (discovered lazily)."""
-        if not self._deps_discovered:
-            self._deps = _discover_deps(self._func)
-            self._deps_discovered = True
-        return self._deps
+        """Return all transitively-reachable JIT deps in leaf-first order."""
+        return self._get_dep_graph()[0]
 
     # ------------------------------------------------------------------
     # Source hash (includes all dep sources; lazily computed after deps found)
@@ -618,12 +778,17 @@ class JITFunction:
         dict[str, TensorMeta],
         dict[str, int | float | bool],
         dict[str, DataType],
-        set[tuple[str, int]],
+        dict[int, set[tuple[str, int]]],
     ]:
         """Bind *args/**kwargs to param names and classify into tensor/scalar metadata.
 
         Returns:
-            (param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, dynamic_dims)
+            (param_names, arguments, tensor_meta, scalar_values,
+            scalar_dtypes, per_func_dyn).  ``per_func_dyn`` is the full
+            per-function dynamic-dim map computed via the cached dep
+            graph; the entry's set drives the cache key, and the same
+            map is reused inside ``_compile`` to avoid re-walking the
+            graph.
         """
         param_names = self._param_names()
         sig = inspect.signature(self._func)
@@ -645,10 +810,13 @@ class JITFunction:
             elif isinstance(value, (int, float, bool)):
                 scalar_values[name] = value
 
-        dynamic_dims = _scan_dynamic_dims(self._func, param_names)
-        dynamic_dims = _propagate_dynamic_dims_from_deps(self._func, self._get_deps(), dynamic_dims)
+        deps, callers_by_id, _, dep_dyn_cache, call_args_cache = self._get_dep_graph()
+        entry_dynamic_dims = _scan_dynamic_dims(self._func, param_names)
+        per_func_dyn = _compute_per_func_dynamic_dims(
+            self._func, deps, entry_dynamic_dims, callers_by_id, dep_dyn_cache, call_args_cache
+        )
 
-        return param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, dynamic_dims
+        return param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn
 
     # ------------------------------------------------------------------
     # Call
@@ -681,19 +849,20 @@ class JITFunction:
         # but is forwarded directly to CompiledProgram.__call__().
         run_config = kwargs.pop("config", None)
 
-        param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, dynamic_dims = self._bind_args(
+        param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
             args, kwargs
         )
 
         # Build cache key. Platform is included so artifacts compiled for
         # different targets never collide in the same cache.
         platform = run_config.platform if run_config is not None else None
+        entry_dyn = per_func_dyn[id(self._func)]
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
             tensor_shapes={n: m.shape for n, m in tensor_meta.items()},
             tensor_dtypes={n: m.dtype for n, m in tensor_meta.items()},
-            dynamic_dims=dynamic_dims,
+            dynamic_dims=entry_dyn,
             scalar_values=scalar_values,
             platform=platform,
         )
@@ -701,7 +870,7 @@ class JITFunction:
         # L1 cache lookup
         if key not in self._cache:
             self._cache[key] = self._compile(
-                tensor_meta, scalar_values, scalar_dtypes, dynamic_dims, pl, platform=platform
+                tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl, platform=platform
             )
 
         # Execute the compiled kernel on device.
@@ -723,7 +892,7 @@ class JITFunction:
         tensor_meta: dict[str, TensorMeta],
         scalar_values: dict[str, int | float | bool],
         scalar_dtypes: dict[str, DataType],
-        dynamic_dims: set[tuple[str, int]],
+        per_func_dyn: dict[int, set[tuple[str, int]]],
         pl: Any,
         platform: str | None = None,
     ) -> Any:
@@ -733,12 +902,17 @@ class JITFunction:
         ``ir.compile()``.  Returns a ``CompiledProgram``
         containing the post-pass ``ir.Program`` and the generated output
         artifacts (orchestration C++, kernel MLIR).
+
+        ``per_func_dyn`` is the precomputed dynamic-dim map from
+        ``_bind_args``.  Reusing it here avoids walking the dep graph
+        twice on every cache miss.
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
-        contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims)
+        contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
-        _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
+        deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
+        _backfill_dynvar_bindings(deps, callers_by_id, dynvar_bindings, dynvar_literals, call_args_cache)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()
@@ -758,7 +932,7 @@ class JITFunction:
         tensor_meta: dict[str, TensorMeta],
         scalar_values: dict[str, int | float | bool],
         scalar_dtypes: dict[str, DataType],
-        dynamic_dims: set[tuple[str, int]],
+        per_func_dyn: dict[int, set[tuple[str, int]]],
         pl: Any,
     ) -> Any:
         """Specialize entry + deps and return the parsed ir.Program (pre-pass).
@@ -767,9 +941,10 @@ class JITFunction:
         compare the specialized IR without running the full pass pipeline or
         requiring the Ascend toolchain.
         """
-        contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims)
+        contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
-        _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
+        deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
+        _backfill_dynvar_bindings(deps, callers_by_id, dynvar_bindings, dynvar_literals, call_args_cache)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()
@@ -787,22 +962,69 @@ class JITFunction:
         tensor_meta: dict[str, TensorMeta],
         scalar_values: dict[str, int | float | bool],
         scalar_dtypes: dict[str, DataType],
-        dynamic_dims: set[tuple[str, int]],
+        per_func_dyn: dict[int, set[tuple[str, int]]],
     ) -> list[SpecializeContext]:
-        """Build SpecializeContext list: deps first, entry last."""
-        contexts: list[SpecializeContext] = []
-        deps = self._get_deps()
+        """Build SpecializeContext list for entry + every transitive dep.
 
-        for dep in deps:
-            dep_ctx = self._build_dep_context(dep, tensor_meta, scalar_values, scalar_dtypes)
-            contexts.append(dep_ctx)
+        Walks the JIT call graph from ``_get_dep_graph()``:
 
-        # Propagate dynamic dims from deps back to the entry function.
-        # If a dep marks one of its params as dynamic and that param maps
-        # to an entry param at the call site, mark that entry param/dim too.
-        entry_dynamic_dims = _propagate_dynamic_dims_from_deps(self._func, deps, dynamic_dims)
+        - Tensor / scalar metadata is resolved top-down (caller-first), so
+          each dep is built using its actual caller's resolved metadata.
+          For nested deps the caller may itself be another dep, not the
+          entry.
+        - Dynamic dims are taken from ``per_func_dyn`` (computed once in
+          ``_bind_args`` via ``_compute_per_func_dynamic_dims``) so we
+          don't re-walk the dep graph here.
+        - Each context's ``dep_names`` is the set of JIT deps that the
+          context's function *directly* calls. The body transformer uses
+          this to rewrite nested ``dep(args)`` calls into the
+          ``self.dep(args)`` form required by multi-function ``@pl.program``.
 
-        dep_func_names = [dep.__name__ for dep in deps]
+        The returned list is in leaf-first order (deps before their
+        callers) so the generated source defines callees before callers.
+        """
+        deps_topo, callers_by_id, callees_by_id, _, _ = self._get_dep_graph()
+
+        # Walk caller-first to resolve each dep's metadata from its actual
+        # caller's already-resolved metadata.
+        resolved: dict[
+            int,
+            tuple[
+                dict[str, TensorMeta],
+                dict[str, int | float | bool],
+                dict[str, DataType],
+            ],
+        ] = {id(self._func): (tensor_meta, scalar_values, scalar_dtypes)}
+
+        # Walk caller-first (reverse of leaf-first topo order) so each dep's
+        # caller metadata is already resolved when we get to it; collect
+        # contexts caller-first, then reverse to restore leaf-first emit
+        # order.
+        dep_contexts: list[SpecializeContext] = []
+        for dep in reversed(deps_topo):
+            # For metadata resolution we use the first-recorded caller. In a
+            # diamond ``entry -> {A, B} -> shared`` only one specialization
+            # of ``shared`` is emitted, so the call sites in other branches
+            # must agree on shapes/dtypes anyway.
+            caller_func = callers_by_id[id(dep._func)][0]
+            c_meta, c_sv, c_sd = resolved[id(caller_func)]
+            dep_meta, dep_sv, dep_sd = _resolve_dep_call_metadata(dep, caller_func, c_meta, c_sv, c_sd)
+            resolved[id(dep._func)] = (dep_meta, dep_sv, dep_sd)
+            dep_contexts.append(
+                build_specialize_context(
+                    func=dep._func,
+                    func_name=dep.__name__,
+                    func_type=dep._func_type,
+                    level=dep._level,
+                    tensor_meta=dep_meta,
+                    scalar_values=dep_sv,
+                    scalar_dtypes=dep_sd,
+                    dynamic_dims=per_func_dyn[id(dep._func)],
+                    dep_names=callees_by_id[id(dep._func)],
+                )
+            )
+        dep_contexts.reverse()
+
         entry_ctx = build_specialize_context(
             func=self._func,
             func_name=self.__name__,
@@ -811,87 +1033,10 @@ class JITFunction:
             tensor_meta=tensor_meta,
             scalar_values=scalar_values,
             scalar_dtypes=scalar_dtypes,
-            dynamic_dims=entry_dynamic_dims,
-            dep_names=dep_func_names,
+            dynamic_dims=per_func_dyn[id(self._func)],
+            dep_names=callees_by_id[id(self._func)],
         )
-        contexts.append(entry_ctx)
-        return contexts
-
-    def _build_dep_context(
-        self,
-        dep: JITFunction,
-        entry_tensor_meta: dict[str, TensorMeta],
-        entry_scalar_values: dict[str, int | float | bool],
-        entry_scalar_dtypes: dict[str, DataType],
-    ) -> SpecializeContext:
-        """Build SpecializeContext for a single dep by mapping call-site arguments.
-
-        Maps the entry function's argument values to the dep's parameter names
-        using the call-site position: ``dep_func(entry_a, entry_b, ...)`` means
-        dep's first param gets entry_a's TensorMeta, second gets entry_b's, etc.
-
-        Falls back to name matching if call-site extraction fails.
-        """
-        dep_param_names = dep._param_names()
-
-        # Try call-site positional mapping first
-        call_args = _extract_call_args_for_dep(self._func, dep.__name__)
-
-        # Also collect intermediate tensors created by pl.create_tensor in the entry
-        intermediate_metas = _extract_create_tensor_metas(self._func)
-        all_tensor_meta = {**intermediate_metas, **entry_tensor_meta}
-
-        dep_tensor_meta: dict[str, TensorMeta] = {}
-        dep_scalar_values: dict[str, int | float | bool] = {}
-        dep_scalar_dtypes: dict[str, DataType] = {}
-
-        if call_args is not None:
-            # Detect keyword-mode: list of (dep_param, entry_arg) 2-tuples
-            if call_args and isinstance(call_args[0], tuple):
-                for dep_param, entry_arg in call_args:
-                    if entry_arg is None or dep_param is None:
-                        continue
-                    if entry_arg in all_tensor_meta:
-                        dep_tensor_meta[dep_param] = all_tensor_meta[entry_arg]
-                    elif entry_arg in entry_scalar_values:
-                        dep_scalar_values[dep_param] = entry_scalar_values[entry_arg]
-                        if entry_arg in entry_scalar_dtypes:
-                            dep_scalar_dtypes[dep_param] = entry_scalar_dtypes[entry_arg]
-            else:
-                # Positional mode: zip dep params with entry arg names
-                for dep_param, entry_arg in zip(dep_param_names, call_args):
-                    if entry_arg is None:
-                        continue
-                    if entry_arg in all_tensor_meta:
-                        dep_tensor_meta[dep_param] = all_tensor_meta[entry_arg]
-                    elif entry_arg in entry_scalar_values:
-                        dep_scalar_values[dep_param] = entry_scalar_values[entry_arg]
-                        if entry_arg in entry_scalar_dtypes:
-                            dep_scalar_dtypes[dep_param] = entry_scalar_dtypes[entry_arg]
-        else:
-            # Fallback: name-based matching
-            dep_tensor_meta = {n: all_tensor_meta[n] for n in dep_param_names if n in all_tensor_meta}
-            dep_scalar_values = {
-                n: entry_scalar_values[n] for n in dep_param_names if n in entry_scalar_values
-            }
-            dep_scalar_dtypes = {
-                n: entry_scalar_dtypes[n] for n in dep_param_names if n in entry_scalar_dtypes
-            }
-
-        # Scan dep's own dynamic dims (from dep's source, using dep's param names)
-        dep_dynamic_dims = _scan_dynamic_dims(dep._func, dep_param_names)
-
-        return build_specialize_context(
-            func=dep._func,
-            func_name=dep.__name__,
-            func_type=dep._func_type,
-            level=dep._level,
-            tensor_meta=dep_tensor_meta,
-            scalar_values=dep_scalar_values,
-            scalar_dtypes=dep_scalar_dtypes,
-            dynamic_dims=dep_dynamic_dims,
-            dep_names=[],
-        )
+        return dep_contexts + [entry_ctx]
 
     def compile_for_test(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize, compile, and return the post-pass ir.Program for testing.
@@ -913,7 +1058,7 @@ class JITFunction:
         import pypto.language as pl  # noqa: PLC0415
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
-        param_names, _, tensor_meta, scalar_values, scalar_dtypes, dynamic_dims = self._bind_args(
+        param_names, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
             args, kwargs
         )
 
@@ -922,7 +1067,7 @@ class JITFunction:
             param_names=param_names,
             tensor_shapes={n: m.shape for n, m in tensor_meta.items()},
             tensor_dtypes={n: m.dtype for n, m in tensor_meta.items()},
-            dynamic_dims=dynamic_dims,
+            dynamic_dims=per_func_dyn[id(self._func)],
             scalar_values=scalar_values,
             platform=None,  # compile_for_test is platform-agnostic (testing only)
         )
@@ -939,13 +1084,13 @@ class JITFunction:
         # for structurally valid IR.
         if key not in self._cache:
             try:
-                self._cache[key] = self._compile(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims, pl)
+                self._cache[key] = self._compile(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
             except Exception:
                 pass
 
         # Return the post-pass ir.Program via the lightweight path
         # (no codegen) for structural equality comparison.
-        pre_pass = self._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims, pl)
+        pre_pass = self._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         return pm.run_passes(pre_pass)
 

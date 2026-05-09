@@ -540,6 +540,144 @@ class TestInlineFuncIntegration:
             f"Expected an *_incore_* outlined function from the spliced pl.at body, got {func_names}"
         )
 
+    def test_nested_inline_dep_graph(self):
+        """A @pl.jit.inline that calls another @pl.jit.inline: both deps must be
+        discovered transitively in leaf-first topological order, with the call
+        graph recording who calls whom (regression for issue #1302)."""
+
+        @jit.inline
+        def leaf(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            return out
+
+        @jit.inline
+        def mid(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = leaf(a, out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = mid(a, out)
+            return out
+
+        deps_topo, callers_by_id, callees_by_id, _, _ = entry._get_dep_graph()
+        assert [d.__name__ for d in deps_topo] == ["leaf", "mid"]
+        assert callers_by_id[id(leaf._func)] == [mid._func]
+        assert callers_by_id[id(mid._func)] == [entry._func]
+        assert callees_by_id[id(entry._func)] == ["mid"]
+        assert callees_by_id[id(mid._func)] == ["leaf"]
+        assert callees_by_id[id(leaf._func)] == []
+
+    def test_nested_inline_compiles(self):
+        """End-to-end repro from issue #1302: an entry that calls an inline
+        that calls another inline must compile without raising and the post-pass
+        IR must have spliced both inline bodies."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def leaf(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], out)
+            return out
+
+        @jit.inline
+        def mid(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = leaf(a, out)
+            return out
+
+        @jit
+        def entry_nested(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = mid(a, out)
+            return out
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        post_pass = entry_nested.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "leaf" not in func_names, f"leaf should be spliced, got {func_names}"
+        assert "mid" not in func_names, f"mid should be spliced, got {func_names}"
+        assert "entry_nested" in func_names
+        assert any("incore" in n for n in func_names), (
+            f"Expected an *_incore_* outlined function from the spliced pl.at body, got {func_names}"
+        )
+
+    def test_nested_inline_diamond(self):
+        """Diamond: entry -> {a_helper, b_helper}, both call the same shared
+        leaf. The shared leaf must be deduplicated in the dep graph."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def shared(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], out)
+            return out
+
+        @jit.inline
+        def a_helper(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = shared(a, out)
+            return out
+
+        @jit.inline
+        def b_helper(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = shared(a, out)
+            return out
+
+        @jit
+        def entry_diamond(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = a_helper(a, out)
+            out = b_helper(a, out)
+            return out
+
+        deps_topo, callers_by_id, _, _, _ = entry_diamond._get_dep_graph()
+        assert len(deps_topo) == 3, f"expected dedup'd shared leaf + a_helper + b_helper, got {deps_topo}"
+        assert {d.__name__ for d in deps_topo} == {"shared", "a_helper", "b_helper"}
+
+        # Both diamond branches must record themselves as callers of the
+        # shared leaf, so dyn-dim / dynvar propagation visits every branch
+        # rather than just the first DFS path.
+        shared_callers = callers_by_id[id(shared._func)]
+        assert {c.__name__ for c in shared_callers} == {"a_helper", "b_helper"}
+        assert callers_by_id[id(a_helper._func)] == [entry_diamond._func]
+        assert callers_by_id[id(b_helper._func)] == [entry_diamond._func]
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        # Compilation must succeed without "Unsupported function call" errors,
+        # and post-pass IR must have spliced both helpers and the shared leaf.
+        post_pass = entry_diamond.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        for spliced in ("shared", "a_helper", "b_helper"):
+            assert spliced not in func_names, f"{spliced} should be spliced, got {func_names}"
+        assert "entry_diamond" in func_names
+
+    def test_mixed_positional_and_keyword_call(self):
+        """Mixed ``dep(a, out=out)`` calls must preserve both positional and
+        keyword bindings so tensor metadata propagates correctly to the dep
+        (regression for CodeRabbit review on PR #1314)."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def helper(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], out)
+            return out
+
+        @jit
+        def entry_mixed(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            # Positional ``a`` plus keyword ``out=out`` — the keyword binding
+            # used to be silently dropped by _extract_call_args_for_dep.
+            out = helper(a, out=out)
+            return out
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        post_pass = entry_mixed.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "helper" not in func_names, f"helper should be spliced, got {func_names}"
+        assert "entry_mixed" in func_names
+
 
 class TestOpaqueFuncIntegration:
     """End-to-end @pl.jit.opaque: dep is emitted as a separate Opaque IR function."""
@@ -681,7 +819,7 @@ class TestVariableRebinding:
             },
             scalar_values={},
             scalar_dtypes={},
-            dynamic_dims=set(),
+            per_func_dyn={id(kernel._func): set()},
             pl=pl,
         )
         assert result is not None
