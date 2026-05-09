@@ -225,8 +225,18 @@ passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
 | 属性 | 值 |
 | ---- | -- |
 | 所需 | SSAForm |
-| 产生 | SSAForm, HierarchyOutlined |
+| 产生 | SSAForm, HierarchyOutlined, OrchestrationReferencesResolved |
 | 失效 | — |
+
+`OrchestrationReferencesResolved` 是一个结构性属性：每一个
+`FunctionType::Orchestration` 函数体内的非 builtin Call 都必须指向
+Program 中存在的 Function。Orchestration 函数本身由用户（或上游 Pass）
+声明 —— 该 Pass 不会改变其类型。该 Pass 实际上做的是：对源程序中
+已有 Call 的 `ScopeStmt(Hierarchy)` 区域提取出 `Opaque` 类型的 callee，
+因此不会引入新的 Orchestration→缺失函数 边；Pass 退出时该属性成立
+（Pass 自身新增的 Call 都指向同一步加入的被提取函数）。流水线通过注册的
+`OrchestrationReferencesResolvedPropertyVerifier` 自动验证；codegen 不再
+做这项检查。
 
 ## HierarchyOutlined 属性验证器
 

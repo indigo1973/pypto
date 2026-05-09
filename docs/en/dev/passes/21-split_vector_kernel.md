@@ -87,6 +87,22 @@ functions whose `attrs["split"]` is non-`None` have had their tile shapes,
 adjusted to per-lane form. Source: `include/pypto/ir/transforms/pass_properties.h`,
 `include/pypto/ir/transforms/ir_property.h`.
 
+### Function-attribute invariant on exit
+
+The pass treats `attrs["dual_aiv_dispatch"]` as the single source of truth
+for the dual-AIV dispatch decision and maintains the following invariant
+on the AIV function it returns:
+
+```text
+SplitMode resolved to non-None  ⇒  attrs["dual_aiv_dispatch"] == true
+```
+
+`ExpandMixedKernel` is the other writer of this attribute (it sets it on
+the no-split mixed-kernel path); `SplitVectorKernel` ensures the split
+path also reflects in the attribute. Orchestration codegen
+(`RequiresDualAivDispatch` in `src/codegen/orchestration/orchestration_codegen.cpp`)
+reads only this attribute and never re-derives from `SplitMode`.
+
 ## Algorithm — split-mode
 
 `ProcessFunction` rewrites a single AIC or AIV function whose
@@ -140,8 +156,11 @@ adjusted to per-lane form. Source: `include/pypto/ir/transforms/pass_properties.
    so every reference (param, iter_arg, return_var, tpop result) sees the
    rewritten Var node.
 6. DeepClone is applied to detach from any shared IR sub-trees.
-7. WithSplitAttr stamps the resolved SplitMode onto Function::attrs
-   (overwriting any prior `split` entry).
+7. WithSplitAttrs stamps the resolved SplitMode onto Function::attrs
+   (overwriting any prior `split` entry). For AIV functions whose
+   resolved mode is non-None it *also* writes `dual_aiv_dispatch=true`
+   so orchestration codegen has a single attribute to read instead of
+   re-deriving the dual-AIV decision from `SplitMode`.
 ```
 
 `tile_vars` is the per-pass map that tracks which `Var`s carry halved
@@ -247,7 +266,10 @@ class After:
         # ... cube ops unchanged ...
         pl.tpush_to_aiv(z_tile, split=1)        # only split kwarg synced
 
-    @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+    @pl.function(
+        type=pl.FunctionType.AIV,
+        attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+    )
     def main_aiv(self, out_0):
         subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
         z_vec: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1)
@@ -275,7 +297,10 @@ def main_aiv(self, data: pl.Tensor[[16, 128], pl.FP32],
 **After**:
 
 ```python
-@pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+@pl.function(
+    type=pl.FunctionType.AIV,
+    attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+)
 def main_aiv(self, data, out_0):
     subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
     prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.load(

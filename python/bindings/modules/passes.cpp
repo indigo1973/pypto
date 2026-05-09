@@ -83,7 +83,9 @@ void BindPass(nb::module_& m) {
       .value("TileTypeCoherence", IRProperty::TileTypeCoherence,
              "Every TileType has canonical tile_view (implicit views stored as nullopt)")
       .value("InlineFunctionsEliminated", IRProperty::InlineFunctionsEliminated,
-             "No FunctionType::Inline functions or Calls to them remain");
+             "No FunctionType::Inline functions or Calls to them remain")
+      .value("OrchestrationReferencesResolved", IRProperty::OrchestrationReferencesResolved,
+             "Every non-builtin Call in an Orchestration function targets a Function in the Program");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -297,6 +299,12 @@ void BindPass(nb::module_& m) {
              "When a tensor.create result is assembled into a target exactly once,\n"
              "replaces create with tensor.slice(target, shape, offsets) and removes\n"
              "the assemble, enabling orchestration codegen to emit .view() directly.");
+
+  passes.def("fold_no_op_reshape", &pass::FoldNoOpReshape,
+             "Fold no-op tile.reshape assignments into Var-to-Var assignments\n\n"
+             "Rewrites `lhs = tile.reshape(rhs, shape)` into `lhs = rhs` when both\n"
+             "sides share the same MemRef root and produce identical TileBufSignatures,\n"
+             "removing the reshape Call so PTO codegen can stay 1:1.");
 
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"

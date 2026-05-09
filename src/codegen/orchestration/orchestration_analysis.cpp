@@ -15,16 +15,12 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <set>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -66,46 +62,6 @@ std::string FormatConstFloatValue(const ConstFloatPtr& c, const std::string& cpp
     return std::to_string(static_cast<float>(v));
   }
   return std::to_string(v);  // double
-}
-
-void ValidateOrchestrationReferences(const ProgramPtr& program, const FunctionPtr& func) {
-  CHECK(func->func_type_ == FunctionType::Orchestration)
-      << "ValidateOrchestrationReferences should only be called on Orchestration functions";
-
-  class FunctionCallCollector : public IRVisitor {
-   public:
-    std::set<std::string> called_functions_;
-
-    void VisitExpr_(const CallPtr& call) override {
-      if (!IsBuiltinOp(call->op_->name_)) {
-        called_functions_.insert(call->op_->name_);
-      }
-      IRVisitor::VisitExpr_(call);
-    }
-  };
-
-  FunctionCallCollector collector;
-  collector.VisitStmt(func->body_);
-
-  std::vector<std::string> missing_functions;
-  for (const auto& func_name : collector.called_functions_) {
-    if (!program->GetFunction(func_name)) {
-      missing_functions.push_back(func_name);
-    }
-  }
-
-  if (!missing_functions.empty()) {
-    std::ostringstream oss;
-    oss << "Orchestration function '" << func->name_ << "' references undefined functions. "
-        << "The Program must contain all functions referenced in orchestration calls.\n"
-        << "Missing functions: [";
-    for (size_t i = 0; i < missing_functions.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << "'" << missing_functions[i] << "'";
-    }
-    oss << "]";
-    throw pypto::ValueError(oss.str());
-  }
 }
 
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,

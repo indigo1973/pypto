@@ -133,6 +133,7 @@ set(PYPTO_SOURCES
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/fold_no_op_reshape_pass.cpp
     src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
@@ -209,6 +210,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
+    src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/perf_hint_tile_innermost_dim.cpp

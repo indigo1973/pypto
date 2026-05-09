@@ -235,8 +235,20 @@ passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
 | Property | Value |
 | -------- | ----- |
 | Required | SSAForm |
-| Produced | SSAForm, HierarchyOutlined |
+| Produced | SSAForm, HierarchyOutlined, OrchestrationReferencesResolved |
 | Invalidated | — |
+
+`OrchestrationReferencesResolved` is a structural property: every
+non-builtin Call inside a `FunctionType::Orchestration` function targets a
+Function present in the Program. Orchestration functions themselves are
+declared by the user (or by upstream passes) — this pass does not change
+their type. What the pass does add is outlined `Opaque` callees that
+already had Calls in the source program, so it never widens the set of
+Orchestration→missing-function edges; once the pass exits, the property
+holds (any Call introduced by the pass targets one of the outlined
+functions added in the same step). The pass pipeline auto-verifies this
+via the registered `OrchestrationReferencesResolvedPropertyVerifier`;
+codegen no longer performs the check.
 
 ## HierarchyOutlined Property Verifier
 

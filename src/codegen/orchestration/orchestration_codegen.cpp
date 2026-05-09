@@ -217,12 +217,14 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   return oss.str();
 }
 
+// AIV functions whose body has been split across two vector cores carry the
+// `dual_aiv_dispatch` attribute. SplitVectorKernel is the single source of
+// truth: any non-None SplitMode on an AIV function ends up reflected in this
+// attribute on pass exit, so codegen reads the attribute directly without
+// re-deriving from SplitMode.
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
-  if (aiv_func == nullptr) {
-    return false;
-  }
-  return aiv_func->GetSplitMode().value_or(SplitMode::None) != SplitMode::None ||
-         (aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false));
+  if (aiv_func == nullptr) return false;
+  return aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false);
 }
 
 // Returns the opening of a rt_submit_{aic,aiv}_task call.
@@ -1687,7 +1689,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
 
-  ValidateOrchestrationReferences(program, func);
+  // OrchestrationReferencesResolved is verified by the pass pipeline (registered
+  // as a property produced by OutlineHierarchyScopes). Codegen assumes well-formed IR.
 
   std::map<std::string, int> func_name_to_id;
   std::map<std::string, CoreType> func_name_to_core_type;

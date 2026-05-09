@@ -84,6 +84,20 @@ result = passes.split_vector_kernel()(program)
 移的 per-lane 调整。来源：`include/pypto/ir/transforms/pass_properties.h`、
 `include/pypto/ir/transforms/ir_property.h`。
 
+### 函数属性出口不变量
+
+该 Pass 把 `attrs["dual_aiv_dispatch"]` 视作 dual-AIV 派发决策的唯一来源，
+并在返回的 AIV 函数上保持以下不变量：
+
+```text
+解析得到的 SplitMode 非 None  ⇒  attrs["dual_aiv_dispatch"] == true
+```
+
+`ExpandMixedKernel` 是该属性的另一个写入者（在 no-split mixed-kernel 路径上
+设置）；`SplitVectorKernel` 保证 split 路径同样通过该属性体现。Orchestration
+codegen（`src/codegen/orchestration/orchestration_codegen.cpp` 中的
+`RequiresDualAivDispatch`）只读这个属性，不再从 `SplitMode` 重新推导。
+
 ## 算法 —— 拆分模式
 
 `ProcessFunction` 重写 `ResolveSplitMode` 解析为
@@ -135,8 +149,10 @@ result = passes.split_vector_kernel()(program)
    保所有引用（param、iter_arg、return_var、tpop 结果）看到的是重写
    后的 Var。
 6. 调用 DeepClone，避免与共享 IR 子树纠缠。
-7. WithSplitAttr 把解析得到的 SplitMode 写回 Function::attrs（覆盖原
-   有 `split` 项）。
+7. WithSplitAttrs 把解析得到的 SplitMode 写回 Function::attrs（覆盖原
+   有 `split` 项）。对于解析得到非 None 模式的 AIV 函数，**还会**写入
+   `dual_aiv_dispatch=true`，让 orchestration codegen 通过单一属性查询
+   决策，而不再从 `SplitMode` 重新推导。
 ```
 
 `tile_vars` 是 Pass 内部的映射，记录哪些 `Var` 携带 halved tile 以及
@@ -238,7 +254,10 @@ class After:
         # ... cube ops 不变 ...
         pl.tpush_to_aiv(z_tile, split=1)        # 仅同步 split kwarg
 
-    @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+    @pl.function(
+        type=pl.FunctionType.AIV,
+        attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+    )
     def main_aiv(self, out_0):
         subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
         z_vec: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1)
@@ -266,7 +285,10 @@ def main_aiv(self, data: pl.Tensor[[16, 128], pl.FP32],
 **After**:
 
 ```python
-@pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+@pl.function(
+    type=pl.FunctionType.AIV,
+    attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+)
 def main_aiv(self, data, out_0):
     subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
     prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.load(

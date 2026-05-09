@@ -79,7 +79,9 @@ inline const PassProperties kOutlineClusterScopesProperties{
 // -- Hierarchy outlining pass -------------------------------------------------
 
 inline const PassProperties kOutlineHierarchyScopesProperties{
-    .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::HierarchyOutlined}};
+    .required = {IRProperty::SSAForm},
+    .produced = {IRProperty::SSAForm, IRProperty::HierarchyOutlined,
+                 IRProperty::OrchestrationReferencesResolved}};
 
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
@@ -210,6 +212,12 @@ inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRPrope
 /// new IRProperty — codegen reads the attr directly.
 inline const PassProperties kDeriveManualScopeDepsProperties{.required = {IRProperty::CallDirectionsResolved},
                                                              .produced = {}};
+
+// -- No-op tile.reshape folding pass -----------------------------------------
+
+inline const PassProperties kFoldNoOpReshapeProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
+                 IRProperty::TileOps2D}};
 
 }  // namespace pass
 }  // namespace ir
