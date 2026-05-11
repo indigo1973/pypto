@@ -66,6 +66,17 @@ inline const PassProperties kNormalizeStmtStructureProperties{
 
 inline const PassProperties kSimplifyProperties{};
 
+// -- Composite op lowering pass (tile.sin / tile.cos -> primitives, etc.) -----
+//
+// LowerCompositeOps decomposes composite tile ops into primitive arithmetic
+// ops. Today the only composite ops handled are tile.sin / tile.cos (Cody-Waite
+// range reduction + degree-9 Horner polynomial); future composite ops register
+// themselves through ``CompositeLoweringRegistry``. The pass operates purely
+// within the existing tile-op vocabulary, so it neither requires nor produces
+// nor invalidates any IRProperty.
+
+inline const PassProperties kLowerCompositeOpsProperties{};
+
 // -- Outlining pass -----------------------------------------------------------
 
 inline const PassProperties kOutlineIncoreScopesProperties{

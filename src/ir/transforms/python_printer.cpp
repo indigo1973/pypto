@@ -17,6 +17,7 @@
 #include <functional>
 #include <iomanip>
 #include <ios>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -324,7 +325,21 @@ class IRPythonPrinter : public IRVisitor {
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
 
-// Helper function to format float literals with decimal point
+// Helper function to format float literals with decimal point.
+//
+// For non-integer values we emit ``max_digits10`` for ``float`` (= 9 digits)
+// — the minimum precision required for an FP32 value to round-trip bit-exactly
+// through print → parse, *provided the parser FP32-snaps* ``ConstFloat.value_``
+// on read. The current parser does NOT snap (it stores the parsed double as-is
+// — see KNOWN_ISSUES.md / the ConstFloat ingest path), so an FP32-truncated
+// value re-parsed by a non-snapping reader can still differ in the lowest bits
+// from the original. The 9-digit emission is the print-side half of the
+// round-trip contract; fixing the parser side closes the loop. PyPTO's default
+// ConstFloat dtype is FP32, so this is the relevant precision for the vast
+// majority of constants the printer sees (e.g. Cody-Waite reduction constants
+// emitted by LowerCompositeOps). The default ``float_format`` (general / %g-style)
+// strips trailing zeros, so simple values like ``0.5`` still print as ``0.5``
+// rather than ``0.500000000``.
 std::string FormatFloatLiteral(double value) {
   // Check if the value is an integer (no fractional part)
   if (value == std::floor(value)) {
@@ -333,9 +348,10 @@ std::string FormatFloatLiteral(double value) {
     oss << std::fixed << std::setprecision(1) << value;
     return oss.str();
   } else {
-    // For non-integer values, use default formatting with enough precision
+    // For non-integer values, use enough precision to round-trip an FP32
+    // value bit-exactly through print → parse → implicit float-cast.
     std::ostringstream oss;
-    oss << value;
+    oss << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
     return oss.str();
   }
 }
