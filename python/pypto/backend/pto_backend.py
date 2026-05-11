@@ -607,21 +607,26 @@ def _generate_config_file(
     return "\n".join(lines) + "\n"
 
 
+class _CallCollector(_ir_core.IRVisitor):
+    """Collect all GlobalVar callee names reachable from a function body."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.callee_names: list[str] = []
+
+    def visit_call(self, op: _ir_core.Call) -> None:
+        if isinstance(op.op, _ir_core.GlobalVar):
+            self.callee_names.append(op.op.name)
+        super().visit_call(op)
+
+
 def _extract_group_member_names(
     group_func: _ir_core.Function,
 ) -> list[str]:
     """Extract function names called by a Group function from its body."""
-    names: list[str] = []
-    stmts = _ir_core.flatten_to_stmts(group_func.body)
-    for stmt in stmts:
-        call = None
-        if isinstance(stmt, _ir_core.EvalStmt):
-            call = stmt.expr
-        elif isinstance(stmt, _ir_core.AssignStmt):
-            call = stmt.value
-        if isinstance(call, _ir_core.Call) and isinstance(call.op, _ir_core.GlobalVar):
-            names.append(call.op.name)
-    return names
+    collector = _CallCollector()
+    collector.visit_stmt(group_func.body)
+    return collector.callee_names
 
 
 def _extract_peer_function_names(
@@ -1046,15 +1051,9 @@ def _collect_chip_task_functions(
 
     while work:
         func = work.pop()
-        for stmt in _ir_core.flatten_to_stmts(func.body):
-            call = None
-            if isinstance(stmt, _ir_core.EvalStmt):
-                call = stmt.expr
-            elif isinstance(stmt, _ir_core.AssignStmt):
-                call = stmt.value
-            if not (isinstance(call, _ir_core.Call) and isinstance(call.op, _ir_core.GlobalVar)):
-                continue
-            callee_name = call.op.name
+        collector = _CallCollector()
+        collector.visit_stmt(func.body)
+        for callee_name in collector.callee_names:
             if callee_name in visited:
                 continue
             callee = program.get_function(callee_name)

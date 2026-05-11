@@ -109,6 +109,7 @@ class DistributedCodegen : public CodegenBase {
   void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
 
   // Helpers
+  void RegisterParamsAndEmitScalarBindings(const ir::FunctionPtr& func);
   [[nodiscard]] std::string ParamDirectionToTensorArgType(ir::ParamDirection dir) const;
   [[nodiscard]] std::vector<ir::FunctionPtr> SortFunctionsByRoleAndLevel() const;
   void ClassifyFunctions();

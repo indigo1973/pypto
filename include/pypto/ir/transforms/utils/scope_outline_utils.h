@@ -633,7 +633,64 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Apply pointer-based substitution after store results are materialized.
-    auto transformed_body = Substitute(pre_sub_body, var_substitution_map);
+    //
+    // We can't reuse `Substitute` here because IRMutator::VisitExpr_(VarPtr)
+    // mints a *fresh* Var when an old Var's type embeds a remapped shape Var
+    // (see mutator.cpp:225-239). For a tensor input whose shape references
+    // another input scalar, this means the body ends up referencing a Var
+    // that's NOT the one we just pushed into `input_params`; the codegen's
+    // param-binding loop then can't find a tensor view for it. We need
+    // visibility into the post-substitution remap state to pull out the
+    // freshened param Vars and update `input_params` accordingly.
+    class TrackingSubstituteMutator : public IRMutator {
+     public:
+      explicit TrackingSubstituteMutator(const std::unordered_map<const Var*, VarPtr>& var_map) {
+        for (const auto& [k, v] : var_map) {
+          var_remap_[k] = v;
+        }
+      }
+      const std::unordered_map<const Expr*, ExprPtr>& GetVarRemap() const { return var_remap_; }
+    };
+    TrackingSubstituteMutator subst_mutator(var_substitution_map);
+    auto transformed_body = subst_mutator.VisitStmt(pre_sub_body);
+
+    // Reconcile param/output Vars with any freshened versions created during
+    // substitution. ResolveVarRemapHit memoizes the resolved (final) Var back
+    // into var_remap_ keyed by the original Var, so the chain
+    //   old → seed (initial param/outlined) → freshened (after type remap)
+    // collapses to old → freshened. Pick that out and replace the stale
+    // entry in input_params / outlined_output_vars / return_types.
+    const auto& post_remap = subst_mutator.GetVarRemap();
+    auto resolve_to_freshened = [&](const VarPtr& original, const VarPtr& seeded) -> VarPtr {
+      auto it = post_remap.find(original.get());
+      if (it == post_remap.end()) return seeded;
+      auto freshened = AsVarLike(it->second);
+      if (!freshened) return seeded;
+      return freshened;
+    };
+    for (size_t i = 0; i < input_vars.size(); ++i) {
+      input_params[i] = resolve_to_freshened(input_vars[i], input_params[i]);
+    }
+    for (size_t i = 0; i < output_vars.size(); ++i) {
+      bool is_store = store_output_set.count(output_vars[i].get()) > 0;
+      if (is_store) {
+        // Store targets aren't seeded into var_substitution_map, but their types
+        // may still embed remapped shape vars that trigger freshening during
+        // substitution. Check only the outlined var key; the original key may
+        // alias an input param (InOut parameters) and produce a false match.
+        auto it = post_remap.find(outlined_output_vars[i].get());
+        if (it != post_remap.end()) {
+          if (auto freshened = AsVarLike(it->second)) {
+            outlined_output_vars[i] = freshened;
+            return_types[i] = freshened->GetType();
+          }
+        }
+        continue;
+      }
+      auto freshened = resolve_to_freshened(output_vars[i], outlined_output_vars[i]);
+      outlined_output_vars[i] = freshened;
+      return_types[i] = freshened->GetType();
+    }
 
     // Build outlined function body (transformed body + return statement)
     StmtPtr outlined_body;

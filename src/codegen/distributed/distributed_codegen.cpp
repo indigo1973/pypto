@@ -25,6 +25,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -184,10 +185,13 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   emitter_.EmitLine(sig.str());
   emitter_.IncreaseIndent();
 
-  // Register parameter names
-  for (const auto& param : func->params_) {
-    declared_vars_.insert(SanitizeName(param->name_hint_));
-  }
+  // Register parameter names and emit local bindings for scalar params.
+  // All orchestrator parameters live in the tensors dict; tensor params are
+  // referenced via tensors["name"] at call sites, but scalar params (e.g.
+  // pl.Scalar[pl.BOOL]) may appear in bare-name contexts such as ``if``
+  // conditions.  Emitting ``name = tensors["name"]`` at the top of the
+  // function body ensures the bare name resolves correctly.
+  RegisterParamsAndEmitScalarBindings(func);
 
   // Emit body
   if (func->body_) {
@@ -210,10 +214,8 @@ void DistributedCodegen::EmitEntryFunction() {
   emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep):");
   emitter_.IncreaseIndent();
 
-  // Register parameter names
-  for (const auto& param : entry_func_->params_) {
-    declared_vars_.insert(SanitizeName(param->name_hint_));
-  }
+  // Register parameter names and emit local bindings for scalar params.
+  RegisterParamsAndEmitScalarBindings(entry_func_);
 
   // Emit body
   if (entry_func_->body_) {
@@ -222,6 +224,16 @@ void DistributedCodegen::EmitEntryFunction() {
 
   emitter_.DecreaseIndent();
   emitter_.EmitLine("");
+}
+
+void DistributedCodegen::RegisterParamsAndEmitScalarBindings(const ir::FunctionPtr& func) {
+  for (const auto& param : func->params_) {
+    std::string name = SanitizeName(param->name_hint_);
+    declared_vars_.insert(name);
+    if (ir::As<ir::ScalarType>(param->GetType())) {
+      emitter_.EmitLine(name + " = tensors[\"" + name + "\"]");
+    }
+  }
 }
 
 // ========================================================================
