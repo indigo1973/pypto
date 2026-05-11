@@ -568,6 +568,35 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         VisitExpr(op->args_[i]);
       }
 
+      // Surface manual_scope dep edges so they show up in IR dumps. The pass
+      // ``LowerManualDepsToTaskId`` rewrites the user-facing
+      // ``kAttrUserManualDepEdges`` (Tensor Vars) into ``kAttrManualDepEdges``
+      // (TaskId Vars). Print whichever is present; both pre- and post-lower
+      // forms round-trip via the parser-recognised ``deps=[...]`` kwarg.
+      const std::vector<VarPtr>* deps_to_print = nullptr;
+      for (const auto& [k, v] : op->attrs_) {
+        if (k != kAttrManualDepEdges && k != kAttrUserManualDepEdges) continue;
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (!edges || edges->empty()) continue;
+        deps_to_print = edges;
+        if (k == kAttrManualDepEdges) break;  // prefer resolved over user-supplied
+      }
+      // Zero-arg self.fn() needs no leading comma before the first kwarg, so
+      // gate every kwarg separator on a shared flag rather than hard-coding
+      // ", " — otherwise self.fn(, deps=[...]) breaks the round-trip.
+      bool need_kwarg_comma = !op->args_.empty();
+      if (deps_to_print) {
+        stream_ << (need_kwarg_comma ? ", " : "") << "deps=[";
+        for (size_t i = 0; i < deps_to_print->size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          if ((*deps_to_print)[i]) {
+            stream_ << GetVarName((*deps_to_print)[i].get());
+          }
+        }
+        stream_ << "]";
+        need_kwarg_comma = true;
+      }
+
       // When ``attrs_["arg_directions"]`` is populated (post DeriveCallDirections),
       // surface the direction vector as a trailing ``attrs={"arg_directions": [...]}``
       // keyword so the parser can recover it on the round-trip. When empty
@@ -579,12 +608,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         INTERNAL_CHECK_SPAN(call_arg_directions.size() == op->args_.size(), op->span_)
             << "Call arg_directions size (" << call_arg_directions.size() << ") must match args size ("
             << op->args_.size() << ")";
-        stream_ << ", attrs={\"arg_directions\": [";
+        stream_ << (need_kwarg_comma ? ", " : "") << "attrs={\"arg_directions\": [";
         for (size_t i = 0; i < call_arg_directions.size(); ++i) {
           if (i > 0) stream_ << ", ";
           stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
         }
         stream_ << "]}";
+        need_kwarg_comma = true;
       }
 
       stream_ << ")";

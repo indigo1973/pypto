@@ -2881,7 +2881,7 @@ class TestManualScopeCodegen:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
-                    b = self.k2(a)
+                    b = self.k2(a, deps=[a])
                 return b
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -2889,13 +2889,18 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code
-        # Every kernel submit inside a manual scope captures task id state.
+        # Every kernel submit inside a manual scope captures the submit's
+        # outputs handle so downstream code can call ``.task_id()`` on it.
+        # We no longer pre-emit a ``PTO2TaskId task_<n>`` variable — the
+        # task_id is materialised at use sites (via a ``system.task_id_of``
+        # AssignStmt synthesised by ``LowerManualDepsToTaskId``).
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code
-        # Auto-derived data-flow edge: k2 consumes `a`, producer of task 0.
-        assert "params_t1.add_dep(task_0);" in code
+        # Explicit dep on `a`: the pass synthesises a TaskId companion
+        # ``a__tid = task_0_outs.task_id();`` and rewrites deps=[a] to the
+        # TaskId version, which codegen emits as ``add_dep(<companion>)``.
+        assert "task_0_outs.task_id()" in code
+        assert ".add_dep(" in code
 
     def test_manual_scope_emits_explicit_user_deps(self):
         backend.reset_for_testing()
@@ -2928,8 +2933,15 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "params_t2.add_dep(task_0);" in code
-        assert "params_t2.add_dep(task_1);" in code
+        # LowerManualDepsToTaskId synthesises ``a__ssa_v0__tid =
+        # task_0_outs.task_id();`` and ``b__ssa_v0__tid = task_1_outs.task_id();``
+        # then rewrites deps=[a, b] to the TaskId companions, which codegen
+        # emits as ``add_dep(<companion>);`` (no is_valid guard since
+        # task_id_of returns a known-valid id).
+        assert "PTO2TaskId a__ssa_v0__tid = task_0_outs.task_id();" in code
+        assert "PTO2TaskId b__ssa_v0__tid = task_1_outs.task_id();" in code
+        assert "params_t2.add_dep(a__ssa_v0__tid);" in code
+        assert "params_t2.add_dep(b__ssa_v0__tid);" in code
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: auto scope keeps the legacy fire-and-forget submit."""
@@ -3023,7 +3035,7 @@ class TestManualScopeCodegen:
                         for j in pl.parallel(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col)
+                            out = self.stage2(scratch, out, row, col, deps=[scratch])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3037,17 +3049,17 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # Both stages capture their task id (so stage2 can ``add_dep`` on
-        # stage1, and any later sibling can ``add_dep`` on either).
+        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
+        # can resolve to it. ``LowerManualDepsToTaskId`` synthesises the
+        # ``system.task_id_of`` Assign which lowers to ``task_<n>_outs.task_id()``.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
 
         # *** Manual dep correctly established WITHIN each iteration ***
         # stage2 reads what stage1 just wrote to ``scratch``: this dep is
         # required for correctness.
-        assert "params_t1.add_dep(task_0);" in code, code
+        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
 
         # *** Correct parallelism ACROSS iterations ***
         # The only ``add_dep`` in the manual scope is the one above; there
@@ -3112,7 +3124,7 @@ class TestManualScopeCodegen:
                         for j in pl.range(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col)
+                            out = self.stage2(scratch, out, row, col, deps=[scratch])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3125,16 +3137,116 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
+        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
+        # can resolve to it (lowered via ``system.task_id_of``).
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
 
         # Manual dep WITHIN each iteration: stage2 follows stage1.
-        assert "params_t1.add_dep(task_0);" in code, code
+        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
 
         # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
         assert code.count("add_dep(") == 1, code
+
+    def test_manual_scope_parallel_dynamic_trip_count_rejected(self):
+        """``pl.parallel(<dynamic>)`` carrying a manual_scope dep must error.
+
+        Array-carry codegen needs a const trip count to allocate a fixed-size
+        ``PTO2TaskId[N]`` fence array. With a dynamic trip count we cannot
+        emit correct multi-deps lowering; silently falling back to a scalar
+        ``last-dispatched`` fence would be wrong. The codegen surfaces this
+        as a clear user-facing CHECK.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS = 128, 128
+        TILE_R, TILE_C = 32, 32
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                n_branches: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(4):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(n_branches):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            out = self.kern(x, out, row, col, deps=[out])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        with pytest.raises(Exception, match="statically-known trip count"):
+            _generate_orch_code(transformed)
+
+    def test_manual_scope_parallel_exceeds_explicit_dep_cap_rejected(self):
+        """``pl.parallel(N)`` with ``N > kMaxExplicitDepsPerTask`` must error.
+
+        Each downstream task receives one ``add_dep`` per parallel slot, so a
+        trip count above ``PTO2_MAX_EXPLICIT_DEPS=16`` overflows the runtime's
+        fixed-size per-task dep store. Codegen surfaces this as a user-facing
+        CHECK rather than emitting code that would fail at runtime.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS = 128, 128
+        TILE_R, TILE_C = 32, 32
+        OVER_CAP = 17  # one past kMaxExplicitDepsPerTask = 16
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(4):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(OVER_CAP):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            out = self.kern(x, out, row, col, deps=[out])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        with pytest.raises(Exception, match="PTO2_MAX_EXPLICIT_DEPS"):
+            _generate_orch_code(transformed)
 
 
 if __name__ == "__main__":
