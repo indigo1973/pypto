@@ -48,18 +48,23 @@ idx: pl.Scalar[pl.INDEX]                # 索引标量
 
 ### 张量布局（TensorLayout）
 
-布局控制 Tensor 的物理内存排列：
-
-| 布局 | 说明 |
-| ---- | ---- |
-| `pl.ND` | N 维（默认，行优先） |
-| `pl.DN` | DN 布局 |
-| `pl.NZ` | NZ 分形格式（硬件特定分块） |
+`pl.Tensor[...]` annotation 写 **runtime 行优先 shape**，不写 layout 标记。layout 是 IR 内部概念，由派生/消费视图的 op 推导，不需要在 annotation 上表达。
 
 ```python
-# 指定布局作为第三个类型参数
-a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]
+# ✅ 推荐 —— 写源 tensor shape，不写 layout 标记：
+b: pl.Tensor[[N, K], pl.FP32]
 ```
+
+```python
+# ⚠️ 已弃用（RFC #1300 补充 1）：
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期触发 DeprecationWarning
+```
+
+> **为什么弃用 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景用 `pl.load(..., transpose=True)` 加载行优先 tensor（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
+
+如需 NZ（硬件 tile layout），写 `pl.Tile[..., pl.NZ]` —— NZ 是 tile-only，不允许作为 TensorType annotation。`pl.NZ` 常量保留用于 tile annotation 和 IR 内部使用。
+
+若需要在 IR 层面写 DN tensor（如测试 fixture 或 round-trip 打印的 IR），用 `pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)` —— 强制写显式 stride，避免隐式坐标翻转的隐患。
 
 ### 动态形状（Dynamic Shapes）
 

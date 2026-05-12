@@ -48,18 +48,37 @@ idx: pl.Scalar[pl.INDEX]                # index scalar
 
 ### Tensor Layouts
 
-Layouts control the physical memory arrangement of Tensors:
-
-| Layout | Description |
-| ------ | ----------- |
-| `pl.ND` | N-Dimensional (default, row-major) |
-| `pl.DN` | DN layout |
-| `pl.NZ` | NZ fractal format (hardware-specific tiling) |
+Write your `pl.Tensor[...]` annotations using the **runtime row-major
+shape** without a layout marker. Layout is an IR-internal concern that
+passes derive from the ops actually producing/consuming views; you do
+not need to express it in the type annotation.
 
 ```python
-# Specify layout as third type parameter
-a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]
+# ✅ Recommended — source tensor shape, no layout marker:
+b: pl.Tensor[[N, K], pl.FP32]
 ```
+
+```python
+# ⚠️ Deprecated (RFC #1300 supplementary 1):
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
+```
+
+> **Why `pl.Tensor[..., pl.DN]` is deprecated.** Writing the DN
+> layout-only shorthand forces you to mentally hold two coordinate systems
+> at once (the IR-logical post-view shape and the runtime row-major shape).
+> Drop the layout marker and write the runtime shape — for matmul B^T,
+> use `pl.load(..., transpose=True)` on the row-major tensor (see "Data
+> Movement" below); for slicing a DN-producing op, the slice inherits
+> the parent's layout automatically.
+
+For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
+tile-only, never a TensorType annotation. The `pl.NZ` constant remains
+available for tile annotations and IR-internal use.
+
+If you need to write a DN tensor at the IR level (e.g. when constructing
+fixtures or round-tripping printed IR), prefer
+`pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)` which forces
+explicit stride and avoids the implicit coordinate-flip hazard.
 
 ### Dynamic Shapes
 
