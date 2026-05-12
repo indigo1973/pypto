@@ -180,7 +180,7 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //     unchanged because ND/DN only describes the trailing two dims. PTOAS
   //     reads this tag and EmitMakeTensorViews / EmitTileLoadPTO use it to
   //     drive the implicit "swap last two dims" path used by
-  //     tile.load(transpose=True) sources (see ResolveTransposeLayout).
+  //     tile.load(transpose=True) sources (see LowerTransposeLoadParamLayout).
   //
   //  2. Explicit strides. tensor.transpose at orchestration level lowers to
   //     runtime Tensor::transpose, a metadata-only swap of shapes / offsets;
@@ -280,6 +280,96 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
 // Registration Function for Tensor Transform Operations
 // ============================================================================
 
+namespace {
+// Helper for reading typed kwargs from the deduce-type entry point.
+// Mirrors the per-file copies in tile_ops/{memory,reduction,sort}.cpp and
+// tensor_ops/reduction.cpp; consider extracting to a shared header in a
+// follow-up cleanup.
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  CHECK(default_value.has_value()) << "tensor op kwarg '" << key << "' is required but missing";
+  return *default_value;
+}
+}  // namespace
+
+TypePtr DeduceTensorAsLayoutType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.as_layout(src, layout=...) — pure layout-tag flip over the same
+  // physical memory (RFC #1300 §3.3). Shape changes that come with the flip
+  // are mechanical (per RFC §4.2 canonical pair: row-major [..,a,b] ND ≡
+  // [..,b,a] DN-packed) and derived here; this op never reshapes.
+  // ``tensor.reshape`` is the right tool for shape changes.
+  CHECK(args.size() == 1) << "tensor.as_layout requires 1 arg (src) plus a 'layout' kwarg, but got "
+                          << args.size() << " positional args";
+
+  auto src_type = As<TensorType>(args[0]->GetType());
+  CHECK(src_type) << "tensor.as_layout: src must be TensorType, got " << args[0]->GetType()->TypeName();
+
+  auto new_layout = GetKwarg<TensorLayout>(kwargs, "layout");
+  CHECK(new_layout != TensorLayout::NZ)
+      << "tensor.as_layout: NZ layout is not allowed on TensorType (NZ is tile-only)";
+
+  // The source must be packed canonical (or bare = implicit ND-packed).
+  // Strided sub-views can't be reinterpreted via the §4.2 canonical pair
+  // because the offset-map equivalence only holds for the packed forms.
+  TensorLayout src_layout =
+      src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
+  CHECK(src_layout != TensorLayout::NZ)
+      << "tensor.as_layout: src has NZ layout (NZ is tile-only and not allowed on TensorType)";
+  if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
+    auto packed = tensor_view_semantics::BuildLogicalStridesFromLayout(src_type->shape_, src_layout);
+    bool is_packed = packed.size() == src_type->tensor_view_->stride.size();
+    for (size_t i = 0; is_packed && i < packed.size(); ++i) {
+      auto pc = As<ConstInt>(packed[i]);
+      auto sc = As<ConstInt>(src_type->tensor_view_->stride[i]);
+      // Treat ExprPtr-identity as a match for symbolic dims; otherwise demand
+      // ConstInt value equality.
+      bool same = (packed[i].get() == src_type->tensor_view_->stride[i].get()) ||
+                  (pc && sc && pc->value_ == sc->value_);
+      is_packed = is_packed && same;
+    }
+    CHECK(is_packed) << "tensor.as_layout: src is a strided sub-view (stride does not match packed canonical "
+                     << "for layout " << TensorLayoutToString(src_layout)
+                     << "). Strided reinterprets are not "
+                     << "supported; use tensor.slice or tensor.reshape on the packed parent first.";
+  }
+
+  // Derive the target shape:
+  //   - same layout (or both effectively ND): identity, shape unchanged
+  //   - cross ND ↔ DN: trailing-two-dim swap (the only canonical pair)
+  std::vector<ExprPtr> new_shape = src_type->shape_;
+  if (src_layout != new_layout) {
+    CHECK(src_type->shape_.size() >= 2)
+        << "tensor.as_layout: cross-layout reinterpret requires rank >= 2, got " << src_type->shape_.size();
+    std::swap(new_shape[new_shape.size() - 2], new_shape[new_shape.size() - 1]);
+  }
+
+  auto new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
+  // Preserve view-extending metadata (``valid_shape`` / ``pad``) from the
+  // source — both fields describe element-level semantics that are layout-
+  // invariant under the §4.2 canonical pair, so dropping them would silently
+  // make sliced or fill-padded tensors look like fully-valid views.
+  if (src_type->tensor_view_.has_value()) {
+    const auto& src_view = src_type->tensor_view_.value();
+    if (!src_view.valid_shape.empty()) {
+      std::vector<ExprPtr> new_valid_shape = src_view.valid_shape;
+      if (src_layout != new_layout && new_valid_shape.size() >= 2) {
+        std::iter_swap(new_valid_shape.end() - 2, new_valid_shape.end() - 1);
+      }
+      new_view.valid_shape = std::move(new_valid_shape);
+    }
+    new_view.pad = src_view.pad;
+  }
+  return std::make_shared<TensorType>(new_shape, src_type->dtype_, src_type->memref_,
+                                      std::make_optional(std::move(new_view)));
+}
+
 REGISTER_OP("tensor.reshape")
     .set_op_category("TensorOp")
     .set_description("Reshape tensor to new shape")
@@ -299,6 +389,28 @@ REGISTER_OP("tensor.transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorTransposeType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.as_layout")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Flip a TensorType's layout tag over the same physical memory (RFC #1300 §3.3). "
+        "The trailing-two-dim shape swap that comes with a ND ↔ DN flip is mechanical "
+        "and derived here; this op never reshapes (use tensor.reshape for shape changes). "
+        "Pure metadata — emits no PTOAS instructions; downstream make_tensor_view "
+        "consumes the new view directly. Internal-only; passes (e.g. "
+        "LowerTransposeLoadParamLayout) inject this at orch ↔ InCore call sites.")
+    .add_argument("input", "Input tensor (TensorType, packed canonical or bare)")
+    // Inherit the input's MemRef: ``tensor.as_layout`` is a metadata-only
+    // reinterpret of the same physical buffer, so its result must alias the
+    // input's allocation. Without this, ``InitMemRef`` would mint a fresh
+    // MemRef and allocate a separate buffer that the runtime alias
+    // (``Tensor result = input;``) never writes to, leading to silent
+    // memory corruption / wrong reads downstream.
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorAsLayoutType(args, kwargs);
     });
 
 TypePtr DeduceTensorConcatType(const std::vector<ExprPtr>& args,

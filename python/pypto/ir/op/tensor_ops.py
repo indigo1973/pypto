@@ -1085,6 +1085,46 @@ def transpose(
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
 
 
+def as_layout(
+    tensor: Expr,
+    layout: TensorLayout,
+    span: Span | None = None,
+) -> Call:
+    """Flip ``tensor``'s layout tag over the same physical memory (RFC #1300 §3.3).
+
+    .. note::
+        Internal IR builder — this op is not exposed via ``pypto.language``.
+        Passes (e.g. ``LowerTransposeLoadParamLayout`` in P6) inject
+        ``tensor.as_layout`` at orch ↔ InCore call sites to bridge ND ↔ DN views
+        over the same physical buffer. The op emits no PTOAS instruction;
+        downstream ``make_tensor_view`` consumes the new view directly.
+
+    The trailing-two-dim shape swap that comes with a cross-layout flip is
+    mechanical (RFC §4.2: row-major ``[..., a, b]`` ND ≡ ``[..., b, a]``
+    DN-packed) and derived from the source — callers don't pass a target
+    shape. For shape changes, use ``tensor.reshape``.
+
+    Validity (enforced by ``DeduceTensorAsLayoutType``):
+
+    1. ``layout`` must not be ``NZ`` (NZ is tile-only and fractal).
+    2. ``tensor`` must be packed canonical or bare (strided sub-views are
+       rejected — the §4.2 equivalence only holds for packed forms).
+    3. Cross-layout flips require rank ≥ 2.
+
+    Args:
+        tensor: Source TensorType (packed canonical or bare).
+        layout: Target ``TensorLayout`` (must not be ``NZ``).
+        span: Optional source span (auto-captured when omitted).
+
+    Returns:
+        ``Call`` expression carrying a TensorType with the canonical
+        ``(shape, stride, layout)`` for the target view.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"layout": layout}
+    return _ir_core.create_op_call("tensor.as_layout", [tensor], kwargs, actual_span)
+
+
 def set_validshape(
     tensor: Expr,
     valid_rows: int | Expr,

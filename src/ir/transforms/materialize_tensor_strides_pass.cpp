@@ -28,9 +28,11 @@
  * The pass is idempotent: re-running it on already-canonical IR is a no-op.
  */
 
+#include <any>
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -163,24 +165,60 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto new_return_type = MaterializeType(op->GetType());
     bool type_changed = new_return_type.get() != op->GetType().get();
 
-    if (!args_changed && !type_changed) return op;
-
-    auto& registry = OpRegistry::GetInstance();
-    if (As<GlobalVar>(op->op_) || !registry.IsRegistered(op->op_->name_)) {
-      // Direct ctor — must supply a result type. Prefer the materialized one
-      // so downstream Vars / Calls see the explicit stride.
-      return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_return_type),
-                                    op->span_);
+    // ``manual_dep_edges`` / ``user_manual_dep_edges`` carry VarPtrs that
+    // reference Vars defined elsewhere in the IR. When this pass mints a
+    // fresh Var for a Tensor whose view stride is being materialized, the
+    // attr entries must follow — otherwise they dangle to the pre-pass
+    // pointer and SSAVerify / orchestration codegen fail.
+    std::vector<std::pair<std::string, std::any>> new_attrs;
+    new_attrs.reserve(op->attrs_.size());
+    bool attrs_changed = false;
+    for (const auto& [k, v] : op->attrs_) {
+      if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+        if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
+          std::vector<VarPtr> new_edges;
+          new_edges.reserve(edges->size());
+          bool any_changed = false;
+          for (const auto& e : *edges) {
+            if (!e) {
+              new_edges.push_back(e);
+              continue;
+            }
+            auto remapped_var = AsVarLike(IRMutator::VisitExpr(e));
+            if (!remapped_var) {
+              new_edges.push_back(e);
+              continue;
+            }
+            if (remapped_var.get() != e.get()) any_changed = true;
+            new_edges.push_back(std::move(remapped_var));
+          }
+          if (any_changed) {
+            attrs_changed = true;
+            new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+            continue;
+          }
+        }
+      }
+      new_attrs.emplace_back(k, v);
     }
-    // OpRegistry rebuilds the Call's type via DeduceType. If the deduced type
-    // is bare and the materialized type is more specific (carries explicit
-    // stride), prefer the materialized one — but in practice most ops produce
-    // bare TensorType and the deduction agrees with the input. To avoid
-    // surprising layout regressions we just accept whatever the registry
-    // returns; if it disagrees with the materialized form, the
-    // TensorViewCanonical verifier (strict mode) will surface that as a
-    // diagnostic so we know to add an explicit op rebuild here.
-    return registry.Create(op->op_->name_, new_args, op->kwargs_, op->span_);
+
+    if (!args_changed && !type_changed && !attrs_changed) return op;
+
+    // Direct ctor — preserve the (materialized) original type and ``attrs_``
+    // rather than re-deducing via OpRegistry.
+    //
+    // Re-deducing would discard intentional type overrides that earlier passes
+    // applied. Concrete case: FlattenTileNdTo2D rewrites a rank-3 ``tile.load``
+    // result to a rank-2 ``TileType`` while keeping the load's offsets/shapes
+    // args at rank 3 (the source-window expressions). If we routed back
+    // through ``OpRegistry::Create`` here, ``DeduceTileLoadType`` would see
+    // the rank-3 shape args and synthesize a fresh rank-3 ``TileType``,
+    // silently undoing the 2D flattening. Forwarding ``op->attrs_`` likewise
+    // preserves call metadata that earlier passes wrote (e.g. arg directions,
+    // manual-dep edges) — re-deduction would drop those.
+    auto attrs_to_use = attrs_changed ? std::move(new_attrs) : op->attrs_;
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(attrs_to_use),
+                                  std::move(new_return_type), op->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

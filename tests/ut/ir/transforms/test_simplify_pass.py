@@ -1143,5 +1143,94 @@ class TestFoldComposition:
         ir.assert_structural_equal(after, Expected)
 
 
+# ============================================================================
+# tensor.as_layout folding (RFC #1300 P4-b)
+# ============================================================================
+
+
+class TestAsLayoutFolding:
+    """Simplify drops identity ``tensor.as_layout`` reinterprets per RFC §3.3.
+
+    ``tensor.as_layout`` is internal-only (not in ``pl.*``), so these tests
+    drive the pass with hand-built IR rather than ``@pl.program``.
+
+    Layout encoding refresher (RFC §4.2): row-major ``[a, b]`` ND describes
+    the same physical buffer as ``[b, a]`` DN-packed. The trailing-dim swap
+    is the canonical pair the validity check accepts.
+
+    Note on chain folding: folding ``as_layout(as_layout(x, ...), ...)`` →
+    ``as_layout(x, ...)`` is intentionally not implemented at this layer.
+    After SSA the outer Call references its inner via a Var, not inline,
+    so naive pointer inspection cannot see across the binding. A dedicated
+    SSA-aware chain optimizer can be added if a real pipeline produces such
+    chains.
+    """
+
+    @staticmethod
+    def _build_program(make_body):
+        """Build a 1-function Program whose body produces a tensor expression.
+
+        ``make_body(x_param)`` returns ``(stmts, return_var)``; the function
+        then returns ``return_var``.
+        """
+        x = ir.Var("x", ir.TensorType([ci(8), ci(4)], DataType.FP32), S)
+        stmts, ret_var = make_body(x)
+        body = wrap_stmts(list(stmts) + [ir.ReturnStmt([ret_var], S)])
+        func = ir.Function("main", [x], [ret_var.type], body, S)
+        return ir.Program([func], "test", S)
+
+    @staticmethod
+    def _iter_stmts(stmt):
+        if isinstance(stmt, ir.SeqStmts):
+            for s in stmt.stmts:
+                yield from TestAsLayoutFolding._iter_stmts(s)
+        else:
+            yield stmt
+
+    def _final_assign(self, program):
+        """Return the function's final AssignStmt (the result-producing one)."""
+        func = program.get_function("main")
+        assert func is not None
+        last = None
+        for stmt in self._iter_stmts(func.body):
+            if isinstance(stmt, ir.AssignStmt):
+                last = stmt
+        assert last is not None, "no AssignStmt in body"
+        return last
+
+    def test_eliminates_identity_as_layout(self):
+        """``as_layout(x, x.layout)`` simplifies to ``x``: target layout
+        matches source layout, so the call is a no-op."""
+
+        def build(x):
+            # x is bare ND [8, 4]; flipping to ND is identity.
+            same = ir.op.tensor.as_layout(x, ir.TensorLayout.ND)
+            same_var = ir.Var("same", same.type, S)
+            return [ir.AssignStmt(same_var, same, S)], same_var
+
+        prog = self._build_program(build)
+        after = passes.simplify()(prog)
+
+        last = self._final_assign(after).value
+        assert isinstance(last, ir.Var) and last.name_hint == "x", (
+            f"expected identity as_layout to simplify to ``x``, got {type(last).__name__} ({last})"
+        )
+
+    def test_preserves_substantive_layout_flip(self):
+        """Genuine ND → DN flip (with the auto trailing-pair swap) survives —
+        Simplify only drops layout-tag identities."""
+
+        def build(x):
+            call = ir.op.tensor.as_layout(x, ir.TensorLayout.DN)
+            v = ir.Var("y", call.type, S)
+            return [ir.AssignStmt(v, call, S)], v
+
+        prog = self._build_program(build)
+        after = passes.simplify()(prog)
+
+        last = self._final_assign(after).value
+        assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
