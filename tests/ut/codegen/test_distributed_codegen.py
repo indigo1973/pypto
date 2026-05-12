@@ -482,6 +482,78 @@ class TestDistributedCodegen:
         alloc_block = code[alloc_idx:host_idx]
         assert "    pass" in alloc_block
 
+    def test_tuple_return_pl_tuple(self):
+        """Tuple-return worker (pl.Tuple) populates per-element tensors aliases."""
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                out_s: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out_d: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                return out_s, out_d
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                out_s: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out_d: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                s, d = self.chip_orch(a, b, out_s, out_d)
+                return s, d
+
+        program = passes.convert_to_ssa()(Input)
+        cg = codegen.DistributedCodegen()
+        code = cg.generate(program)
+
+        # Each tuple element should get its own tensors[...] alias
+        assert code.count('tensors["') >= 2
+        # submit_next_level emitted for chip_orch
+        assert "submit_next_level" in code
+        # Two OUTPUT_EXISTING args for the two Out params
+        assert code.count("TensorArgType.OUTPUT_EXISTING") == 2
+
+    def test_tuple_return_builtin_tuple(self):
+        """Tuple-return worker (builtin tuple[...]) also produces per-element aliases."""
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                out_s: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out_d: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                return out_s, out_d
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                out_s: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out_d: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                s, d = self.chip_orch(a, b, out_s, out_d)
+                return s, d
+
+        program = passes.convert_to_ssa()(Input)
+        cg = codegen.DistributedCodegen()
+        code = cg.generate(program)
+
+        # Must produce identical structure as the pl.Tuple variant
+        assert code.count('tensors["') >= 2
+        assert "submit_next_level" in code
+        assert code.count("TensorArgType.OUTPUT_EXISTING") == 2
+
 
 class TestSubWorkerSourceGeneration:
     """Test _emit_sub_worker_module for correct param names and imports."""

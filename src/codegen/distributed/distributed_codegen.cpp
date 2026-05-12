@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -50,6 +51,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   used_levels_.clear();
   hoisted_allocs_.clear();
   host_orch_body_after_hoist_ = false;
+  tuple_element_tensors_.clear();
 
   ClassifyFunctions();
   CHECK(!workers_.empty() || !orchestrators_.empty())
@@ -287,6 +289,26 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   // name for downstream tensors[...] references but emit nothing here.
   if (host_orch_body_after_hoist_ && hoisted_allocs_.count(op.get())) {
     declared_vars_.insert(var_name);
+    return;
+  }
+
+  // Handle TupleGetItemExpr: `out_rms = tuple_tmp[i]` produced by multi-return
+  // function call unpacking.  Resolve each element to its actual Out/InOut
+  // parameter tensor recorded in tuple_element_tensors_ during EmitCallToWorker.
+  if (auto tge = std::dynamic_pointer_cast<const ir::TupleGetItemExpr>(op->value_)) {
+    INTERNAL_CHECK_SPAN(ir::AsVarLike(tge->tuple_) != nullptr, op->span_)
+        << "Internal error: TupleGetItemExpr tuple_ must be a Var-like expression "
+        << "for distributed codegen tuple-return unpacking";
+    VisitExpr(tge->tuple_);
+    std::string tuple_var = current_expr_value_;
+    current_expr_value_ = "";
+    auto it = tuple_element_tensors_.find(std::make_pair(tuple_var, tge->index_));
+    INTERNAL_CHECK_SPAN(it != tuple_element_tensors_.end(), op->span_)
+        << "Internal error: TupleGetItemExpr unpacking found no Out parameter "
+        << "for tuple var '" << tuple_var << "' index " << tge->index_;
+    emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + it->second + "\"]");
+    declared_vars_.insert(var_name);
+    current_target_var_ = "";
     return;
   }
 
@@ -548,15 +570,40 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // parameter tensor.  In simpler's runtime model, the callee writes in-place
   // to the OUT parameter, so the return value is the same tensor.
   if (!target.empty() && !callee->return_types_.empty()) {
-    // Find the first Out/InOut parameter — that is the tensor the return value aliases
-    for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
-      if (callee->param_directions_[i] == ir::ParamDirection::Out ||
-          callee->param_directions_[i] == ir::ParamDirection::InOut) {
-        VisitExpr(call->args_[i]);
-        std::string out_arg = current_expr_value_;
-        current_expr_value_ = "";
-        emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + out_arg + "\"]");
-        break;
+    // Tuple return is expressed in two ways in the IR:
+    //   1. pl.Tuple[T1, T2] → return_types_ = [TupleType(T1, T2)]  (single entry)
+    //   2. tuple[T1, T2]    → return_types_ = [T1, T2]             (flat entries)
+    // Both produce TupleGetItemExpr for unpacking, so handle both.
+    bool is_tuple_return =
+        std::dynamic_pointer_cast<const ir::TupleType>(callee->return_types_.front()) != nullptr ||
+        callee->return_types_.size() > 1;
+    if (is_tuple_return) {
+      // Tuple return: populate tuple_element_tensors_ so that downstream
+      // TupleGetItemExpr AssignStmts resolve each element to its Out param.
+      // Do NOT emit a tensors["target"] alias here — the individual
+      // TupleGetItemExpr unpacking statements handle per-element aliasing.
+      int out_idx = 0;
+      for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
+        if (callee->param_directions_[i] == ir::ParamDirection::Out ||
+            callee->param_directions_[i] == ir::ParamDirection::InOut) {
+          VisitExpr(call->args_[i]);
+          std::string out_arg = current_expr_value_;
+          current_expr_value_ = "";
+          tuple_element_tensors_[std::make_pair(target, out_idx)] = out_arg;
+          ++out_idx;
+        }
+      }
+    } else {
+      // Single return: alias target to the first Out/InOut parameter tensor.
+      for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
+        if (callee->param_directions_[i] == ir::ParamDirection::Out ||
+            callee->param_directions_[i] == ir::ParamDirection::InOut) {
+          VisitExpr(call->args_[i]);
+          std::string out_arg = current_expr_value_;
+          current_expr_value_ = "";
+          emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + out_arg + "\"]");
+          break;
+        }
       }
     }
   }

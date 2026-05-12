@@ -142,6 +142,12 @@ class DistributedCodegen : public CodegenBase {
   // assignments that have already been emitted in _alloc_intermediates.
   std::unordered_set<const ir::AssignStmt*> hoisted_allocs_;
   bool host_orch_body_after_hoist_{false};
+
+  // Tuple-return support: maps (tuple_tmp_var_name, element_index) to the
+  // actual Out/InOut parameter tensor name in tensors[...].  Populated by
+  // EmitCallToWorker when the callee has a TupleType return; consumed by
+  // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
+  std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
 };
 
 }  // namespace codegen
