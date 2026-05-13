@@ -414,6 +414,16 @@ class IRSerializer::Impl {
       if (tensor_type->tensor_view_.has_value()) {
         type_map["tensor_view"] = SerializeTensorView(tensor_type->tensor_view_, zone);
       }
+
+      // DistributedTensorType-only: serialise the optional WindowBuffer
+      // back-reference as a node reference (WindowBuffer is an IRNode and
+      // shares the ref-table with the rest of the IR).
+      if (type->GetKind() == ObjectKind::DistributedTensorType) {
+        auto dt = std::static_pointer_cast<const DistributedTensorType>(type);
+        if (dt->window_buffer_.has_value()) {
+          type_map["window_buffer"] = SerializeNode(*dt->window_buffer_, zone);
+        }
+      }
     } else if (auto tile_type = As<TileType>(type)) {
       type_map["dtype"] = msgpack::object(tile_type->dtype_.Code(), zone);
 
@@ -447,8 +457,9 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type)) {
-      // MemRefType, PtrType, and UnknownType have no additional fields
+    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
+               IsA<WindowBufferType>(type)) {
+      // Singleton marker types (no extra fields beyond the type_kind key).
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();
     }

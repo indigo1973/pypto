@@ -31,6 +31,7 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/type_registry.h"
 #include "pypto/ir/span.h"
@@ -323,10 +324,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     msgpack::object memref_obj;
     msgpack::object tile_view_obj;
     msgpack::object tensor_view_obj;
+    msgpack::object window_buffer_obj;
     uint8_t memory_space_code = 0;
     bool has_memref = false;
     bool has_tile_view = false;
     bool has_tensor_view = false;
+    bool has_window_buffer = false;
     bool has_memory_space = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
@@ -360,6 +363,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "tensor_view") {
         tensor_view_obj = p->val;
         has_tensor_view = true;
+      } else if (key == "window_buffer") {
+        window_buffer_obj = p->val;
+        has_window_buffer = true;
       } else if (key == "memory_space") {
         p->val.convert(memory_space_code);
         has_memory_space = true;
@@ -381,9 +387,21 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
       return std::make_shared<TensorType>(shape, DataType(dtype_code), memref, tensor_view);
     } else if (type_kind == "DistributedTensorType") {
-      // DistributedTensorType currently carries only shape + dtype (no memref /
-      // tensor_view at the surface; alloc-side metadata lives on the alloc op).
-      return std::make_shared<DistributedTensorType>(shape, DataType(dtype_code));
+      std::optional<MemRefPtr> memref;
+      std::optional<TensorView> tensor_view;
+      std::optional<WindowBufferPtr> window_buffer;
+      if (has_memref) {
+        memref = DeserializeMemRef(memref_obj, zone);
+      }
+      if (has_tensor_view) {
+        tensor_view = DeserializeTensorView(tensor_view_obj, zone);
+      }
+      if (has_window_buffer) {
+        window_buffer =
+            std::static_pointer_cast<const WindowBuffer>(DeserializeNode(window_buffer_obj, zone));
+      }
+      return std::make_shared<DistributedTensorType>(shape, DataType(dtype_code), memref, tensor_view,
+                                                     window_buffer);
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
@@ -405,6 +423,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
+    } else if (type_kind == "WindowBufferType") {
+      return GetWindowBufferType();
     } else if (type_kind == "MemRefType") {
       return GetMemRefType();
     } else if (type_kind == "Ptr") {
