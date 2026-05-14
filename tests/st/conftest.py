@@ -163,6 +163,13 @@ def pytest_addoption(parser):
         help="PyPTO C++ log level threshold (default: ERROR)",
     )
     parser.addoption(
+        "--runtime-log-level",
+        action="store",
+        default=None,
+        help="PyPTO runtime log level (debug, v0..v9, info, warn, error, null). "
+        "Default: leave the runtime logger at its V5/INFO default.",
+    )
+    parser.addoption(
         "--pto-isa-commit",
         action="store",
         default=None,
@@ -434,6 +441,17 @@ def pytest_configure(config):
         set_log_level(LogLevel[level_name])
     except (ValueError, KeyError):
         pass  # option not yet registered (e.g. during --co --help)
+
+    # Set PyPTO runtime log level (orthogonal to PyPTO C++ logger above).
+    try:
+        runtime_level = config.getoption("--runtime-log-level")
+    except KeyError:
+        pass  # option not yet registered (e.g. during --co --help)
+    else:
+        if runtime_level is not None:
+            from pypto.runtime import configure_log  # noqa: PLC0415
+
+            configure_log(runtime_level)  # ValueError propagates: invalid CLI value must fail fast
 
 
 def pytest_collection_modifyitems(config, items):
