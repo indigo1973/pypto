@@ -185,7 +185,7 @@ from .op.unified_ops import (
 from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .scope import manual_scope
+from .scope import manual_scope, submit
 from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
@@ -220,6 +220,11 @@ UINT32 = DataType.UINT32
 UINT64 = DataType.UINT64
 BOOL = DataType.BOOL
 INDEX = DataType.INDEX
+TASK_ID = DataType.TASK_ID
+
+# Convenience alias for the TaskId scalar annotation (manual_scope deps).
+# ``pl.TaskId`` is equivalent to ``pl.Scalar[pl.TASK_ID]``.
+TaskId = Scalar[TASK_ID]
 
 __all__ = [
     "jit",
@@ -368,6 +373,7 @@ __all__ = [
     "dim",
     "full",
     "manual_scope",
+    "submit",
     "no_dep",
     "scatter_update",
     "sin",
@@ -415,4 +421,6 @@ __all__ = [
     "UINT64",
     "BOOL",
     "INDEX",
+    "TASK_ID",
+    "TaskId",
 ]

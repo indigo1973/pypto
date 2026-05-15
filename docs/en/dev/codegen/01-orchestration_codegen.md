@@ -11,7 +11,7 @@ For example, return-to-parameter tracing (mapping callee return values back to `
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
 - Wraps device memory pointers (via `ChipStorageTaskArgs`) into `Tensor` objects
-- Builds `Arg` objects (or `ArgWithDeps<N>` when the task carries explicit `add_dep` edges inside a manual scope) and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
+- Builds `Arg` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters (manual-scope dep edges are emitted separately via a `set_dependencies` stack array — see [Manual Scope and TaskId Lowering](#manual-scope-and-taskid-lowering))
 - Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
 
@@ -389,26 +389,55 @@ The orchestration file is named `orchestration/<func_name>.cpp` in the generated
 ## Manual Scope and TaskId Lowering
 
 `with pl.manual_scope():` regions lower to a `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
-block where the runtime's auto OverlapMap is disabled. The orchestration
-codegen materialises every required dependency edge as an explicit
-`params.add_dep(<task_id>);` call, sourced from the IR produced by the
-manual-scope lowering phase of [DeriveCallDirections](../passes/33-derive_call_directions.md).
+block where the runtime's auto OverlapMap is disabled. Per-task params are
+always declared as a plain `Arg <task_var>;`. The orchestration codegen
+materialises the required dependency edges as a fixed-size stack array plus
+a single `set_dependencies` call:
+
+```cpp
+Arg params_t1;
+params_t1.add_input(...);
+// ...
+PTO2TaskId params_t1_deps[K];          // K = exact dep-edge count
+uint32_t params_t1_deps_count = 0;
+if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // every entry is is_valid()-guarded
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
+params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
+```
+
+Every dep slot is wrapped in `if (task_id.is_valid())`: any TaskId may
+legitimately hold the `PTO2TaskId::invalid()` sentinel — a `None` loop-carry
+seed, an early loop iteration's iter_arg carry, or an unwritten array slot —
+and an invalid id must never reach `set_dependencies`. The guard is a cheap
+always-true branch for ids known valid.
+
+There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
+— the runtime `Arg::set_dependencies` primitive has no upper bound, and the
+stack array is sized to the exact count. The dep edges come straight from
+the parser: it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg
+into `Call.attrs["manual_dep_edges"]` as a `vector<VarPtr>` of
+`Scalar[TASK_ID]` variables.
 
 ### TaskId sourcing
 
-After the pass, every kernel `Call` carries `attrs["manual_dep_edges"]` —
-a `vector<VarPtr>` of `Scalar[TASK_ID]` variables. Each entry resolves at
-codegen time through `manual_task_id_map_` to one of three forms:
+Every kernel `Call` inside a manual scope carries
+`attrs["manual_dep_edges"]` — a `vector<VarPtr>` of `Scalar[TASK_ID]`
+variables. Each entry resolves at codegen time through
+`manual_task_id_map_` to one of three forms:
 
 | Producer kind | C++ source emitted by codegen |
 | ------------- | ----------------------------- |
-| Kernel Call LHS (`system.task_id_of(producer)` synthesised by the pass) | `PTO2TaskId <lhs>__tid = task_<n>_outs.task_id();` |
-| Function-param seed (`system.task_invalid()` synthesised at body entry) | `PTO2TaskId <param>__tid = PTO2TaskId::invalid();` |
-| Loop-carry iter_arg (TaskId companion appended by the pass) | A named variable threaded through the for-loop, either scalar or array — see below |
+| `pl.submit` producer TaskId (the augmented Call's TaskId tuple element) | `PTO2TaskId <tid_name> = task_<n>_outs.task_id();` where `task_<n>_outs` is the `TaskOutputTensors` captured from the submit |
+| `None` seed (the literal in a `deps=[None]` entry or a TaskId iter_arg init) | `PTO2TaskId::invalid()` |
+| Loop-carry iter_arg (TaskId companion threaded through a loop) | A named variable threaded through the for-loop, either scalar or array — see below |
 
-`add_dep` is wrapped in `if (<task_id>.is_valid())` when the source is an
-iter_arg carry (first-iteration seed may still be the invalid sentinel) and
-emitted unconditionally for direct producer companions.
+The kernel-result tuple elements of a `pl.submit` call alias the kernel's
+`Out`/`InOut` args exactly like an ordinary multi-output kernel call.
+
+A dep array-fill entry is wrapped in `if (<task_id>.is_valid())` when the
+source is an iter_arg / array-slot carry (first-iteration seed may still be
+the invalid sentinel) and appended unconditionally for direct
+`pl.submit`-producer TaskId bindings.
 
 ### Array carry for `pl.parallel` TaskId iter_args
 
@@ -427,12 +456,12 @@ codegen detects this shape (Parallel kind + TaskId iter_arg) and:
    expression peephole-simplifies to `arr[loop_var]` when `start == 0` and
    `step == 1` (the common form).
 3. On every downstream consumer whose `manual_dep_edges` references this
-   iter_arg, expands the single dep entry into N guarded `add_dep` calls,
+   iter_arg, fills N guarded slots into the task's dep stack array,
    one per slot:
 
    ```cpp
    for each k in [0..N):
-       if (arr[k].is_valid()) { params.add_dep(arr[k]); }
+       if (arr[k].is_valid()) { params_deps[params_deps_count++] = arr[k]; }
    ```
 
 A `pl.range` (Sequential) loop whose yield value is the rv of an inner
@@ -447,10 +476,9 @@ in topologies like case1 (outer SEQ × inner PARALLEL).
   A dynamic trip count is rejected at codegen with a "statically-known trip
   count" message.
 
-The downstream wrapper is sized to the exact dep count via `ArgWithDeps<N>`
-(see `runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/orchestration/pto_arg_with_deps.h`),
-so trip counts larger than 16 are not capped — the runtime primitive
-`Arg::set_dependencies(ptr, count)` has no upper bound either.
+The dep stack array is sized to the exact dep count (for an array carry,
+`N` slots), so trip counts larger than 16 are not capped — the runtime
+primitive `Arg::set_dependencies(ptr, count)` has no upper bound either.
 
 ### Example
 
@@ -458,20 +486,20 @@ Source DSL (case1 shape):
 
 ```python
 with pl.manual_scope():
+    prev_tid = None
     for phase in pl.range(N_PHASES):
         for branch in pl.parallel(N_BRANCHES):
             row = (phase * N_BRANCHES + branch) * TILE_M
-            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            out, prev_tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[prev_tid])
 ```
 
 Generated C++ (skeleton):
 
 ```cpp
-PTO2TaskId out__ssa_v0__tid = PTO2TaskId::invalid();           // import-var seed
 PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
     PTO2TaskId out__rv_v2__tid[N_BRANCHES];                    // outer rv = array
     for (int64_t i = 0; i < N_BRANCHES; ++i)
-        out__rv_v2__tid[i] = out__ssa_v0__tid;                 // broadcast scalar init
+        out__rv_v2__tid[i] = PTO2TaskId::invalid();            // broadcast None seed
     for (int64_t phase = 0; phase < N_PHASES; phase += 1) {
         PTO2TaskId out__rv_v4__tid[N_BRANCHES];                // inner rv = array
         for (int64_t i = 0; i < N_BRANCHES; ++i)
@@ -479,10 +507,13 @@ PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
         for (int64_t branch = 0; branch < N_BRANCHES; branch += 1) {
             int64_t row = ...;
             Arg params_t0; /* ... */
+            PTO2TaskId params_t0_deps[N_BRANCHES];             // sized to array-carry N
+            uint32_t params_t0_deps_count = 0;
             for (int64_t k = 0; k < N_BRANCHES; ++k) {         // multi-deps fanout
                 if (out__rv_v2__tid[k].is_valid())
-                    params_t0.add_dep(out__rv_v2__tid[k]);
+                    params_t0_deps[params_t0_deps_count++] = out__rv_v2__tid[k];
             }
+            params_t0.set_dependencies(params_t0_deps, params_t0_deps_count);
             TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
             PTO2TaskId out__ssa_v5__tid = task_0_outs.task_id();
             out__rv_v4__tid[branch] = out__ssa_v5__tid;        // slot yield
@@ -499,5 +530,4 @@ Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
-- [DeriveCallDirections (Phase 2: manual-scope lowering)](../passes/33-derive_call_directions.md) — the pass that produces the post-lowering IR consumed here
 - [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form

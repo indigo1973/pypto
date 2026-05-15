@@ -289,3 +289,23 @@ def tfree_to_aiv(tile: Expr, span: Span | None = None, *, id: int | None = None)
     if id is not None:
         kwargs["id"] = id
     return _ir_core.create_op_call("system.tfree_to_aiv", [tile], kwargs, actual_span)
+
+
+# ============================================================================
+# Manual-scope TaskId primitives
+# ============================================================================
+
+
+def task_invalid(*, span: Span | None = None) -> Call:
+    """Construct an invalid ``PTO2TaskId`` sentinel.
+
+    Returns a ``Call`` of result type ``Scalar[TASK_ID]`` that codegen lowers
+    to ``PTO2TaskId::invalid()`` — the "no producer" sentinel that downstream
+    ``set_dependencies`` calls skip via an ``is_valid()`` guard. Surfaced in
+    the DSL as the Python literal ``None`` in TaskId-typed positions.
+
+    Args:
+        span: Optional source span (auto-captured if not provided).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.task_invalid", [], {}, actual_span)

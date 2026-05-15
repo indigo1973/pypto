@@ -335,11 +335,10 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | -------- | ---- | ---- |
 | `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。**仅 auto scope 生效**——在 `pl.manual_scope` 内没有语义。 |
 | `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户必须通过 `deps=[...]` **显式声明每一条**需要的排序边。 |
-| `kernel(..., deps=[var, ...])` | per-call（仅 manual_scope 内） | 声明显式 task-id 边。每个条目必须是：同一 `manual_scope` 内由先前 `self.kernel(...)` 产生的 tensor `Var`，或在循环中承载该 producer 的 iter_arg / return_var，或作为初始种子传入的函数参数。 |
+| `result, tid = pl.submit(kernel, *args, deps=[...])` | per-call submit | 在 `manual_scope` 内提交 `kernel` 并解包一个二元组：`result` 是 kernel 的结果（单输出 kernel 为单个名字，多输出 kernel 为名字 tuple），`tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。`deps=[...]` **只**在 `pl.submit(...)` 上被接受。 |
+| `None`（Python 字面量） | per-loop 种子 / dep 条目 | "暂无 producer" 的 TaskId 哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`None` 也可作为 `deps=[None]` 条目（被丢弃——不贡献任何边）。当它出现在 TaskId 位置时下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
 
-Manual scope 是**只看声明**的：即使 `stage2` 读取了 `stage1` 写过的 buffer，
-若用户没写 `deps=[scratch]`，pass 也不会替你补上。之前的数据流自动推导
-已被移除，因为当不同 kernel 在同一块 buffer 上原地复用时它会产生大量伪边。
+普通的 `out = self.kernel(...)` 是 **fire-and-forget**：它不返回 task id，并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。Manual scope 是**只看声明**的：即使某个 kernel 读取了先前 kernel 写过的 buffer，若 `pl.submit` 上没写 `deps=[...]`，编译器也不会替你补上。每个 `deps=[...]` 条目必须是 TaskId 值：先前 `pl.submit(...)` 绑定的 `tid`、TaskId 循环 iter_arg carry、来自 `pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量 `None`。`deps=[...]` 不接受 tensor。
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
@@ -347,28 +346,28 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
          scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
          out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
-        scratch = self.stage1(x, scratch)
-        out     = self.stage2(scratch, out, deps=[scratch])   # 必需：stage2 读 scratch
+        scratch, stage1_tid = pl.submit(self.stage1, x, scratch)
+        out, _ = pl.submit(self.stage2, scratch, out, deps=[stage1_tid])  # stage2 follows stage1
     return out
 ```
 
-`with pl.manual_scope():` 内由
-[DeriveCallDirections](../passes/33-derive_call_directions.md)
-pass 的 manual scope 降级阶段（内部实现为 `LowerManualDepsToTaskId`）
-把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
-`manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
-TaskId iter_arg / return_var / yield 项。不再对每 call 边数设上限——
-codegen 按实际依赖数生成 `ArgWithDeps<N>`。
+`pl.submit` 脱糖为单个 `ir.Call`，其返回类型是扁平的增广
+`TupleType([*<kernel return types>, ScalarType(TASK_ID)])` ——
+元素 `0..N-1` 是 kernel 结果，元素 `N` 是 producer TaskId。parser 把每个
+`deps=[...]` 列表直接写入 kernel `Call.attrs["manual_dep_edges"]`（一个
+`vector<VarPtr>`）。codegen 填充一个按精确依赖数定长的栈数组，并对每个
+task 发出一次 `params.set_dependencies(arr, count);` 调用。runtime 的
+`Arg::set_dependencies(ptr, count)` 直接接收调用者持有的任意长度数组，
+所以单 call 的依赖边数没有硬上限。
 
-`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用——
-pass 不再以 per-arg direction 做依赖解析。
+`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用。
 
 #### Manual scope 下的 `pl.parallel`：array-carry fence
 
 当 manual-dep 边穿过一个 `pl.parallel` 循环（即循环 iter_arg 承载被依赖的
 TaskId）时，orchestration codegen 把对应的 TaskId iter_arg 视作**大小等于
 parallel 循环 trip count 的数组**。每次 parallel 迭代写入自己的槽位；
-下游消费者对**每个**槽位都生成 `add_dep`（不是只对"最后被发射"的那个
+下游消费者依赖**每一个**槽位（不是只依赖"最后被发射"的那个
 task）。这就保证用户声明的 fence 语义即便在迭代乱序完成时也是正确的。
 
 走 array-carry 路径的前提：
@@ -379,14 +378,16 @@ task）。这就保证用户声明的 fence 语义即便在迭代乱序完成时
 
 ```python
 with pl.manual_scope():
+    prev_tid = None                                      # 种子：还没有 producer
     for phase in pl.range(N_PHASES):
         for branch in pl.parallel(N_BRANCHES):           # 编译期常量
             row = (phase * N_BRANCHES + branch) * TILE_M
-            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            out, prev_tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[prev_tid])
 ```
 
-phase `N+1` 中的每个 task 都会等待 phase `N` 的全部 `N_BRANCHES` 个
-task，而非只等最后那个。
+`prev_tid` 在 `pl.parallel` 内被重新绑定，所以 codegen 把 carry 下沉为
+`PTO2TaskId[N_BRANCHES]` 数组。phase `N+1` 中的每个 task 都会等待
+phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 
 ### Yield 语句
 

@@ -22,18 +22,17 @@ The orchestrator wraps the nested loops in ``with pl.manual_scope():``:
         row = i * TILE_R
         for j in pl.parallel(N):
             col = j * TILE_C
-            scratch = self.stage1(x, scratch, row, col)
-            out     = self.stage2(scratch, out, row, col)
+            scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+            out, _              = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
 
 What the swimlane visualization should show
 -------------------------------------------
-The user-declared ``deps=[scratch]`` on the stage2 call, lowered by
-``LowerManualDepsToTaskId``, produces:
+The user-declared ``deps=[stage1_tid]`` on the stage2 submit produces:
 
-* **Within an iteration**: stage2 has an explicit ``add_dep(task_<stage1>)``
-  on stage1, so stage2 starts strictly after stage1 finishes for the same
-  ``(i, j)`` tile.
-* **Across iterations**: no extra ``add_dep`` is emitted, so different
+* **Within an iteration**: stage2's ``set_dependencies`` lists stage1's
+  producer TaskId, so stage2 starts strictly after stage1 finishes for the
+  same ``(i, j)`` tile.
+* **Across iterations**: no extra dependency is emitted, so different
   ``(i, j)`` tiles run at maximum parallelism.
 
 In the swimlane chart this manifests as 2 vertically-stacked tasks per
@@ -128,8 +127,8 @@ def _build_program():
                     row: pl.Scalar[pl.INDEX] = i * TILE_R
                     for j in pl.parallel(N):
                         col: pl.Scalar[pl.INDEX] = j * TILE_C
-                        scratch = self.stage1(x, scratch, row, col)
-                        out = self.stage2(scratch, out, row, col, deps=[scratch])
+                        scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+                        out, _ = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
             return out
 
     return ManualScopePipelineProgram
@@ -172,7 +171,7 @@ class TestManualScopePipeline:
         """``out`` matches ``2 * x + 1`` after on-board execution.
 
         This guards against three regressions at once: the manual_scope
-        codegen wrapper, the explicit ``add_dep`` between stage1/stage2,
+        codegen wrapper, the explicit ``set_dependencies`` edge between stage1/stage2,
         and the absence of cross-iteration serialization (which would
         still pass numerically but show up as wrong parallelism in the
         swimlane fixture below).
@@ -244,7 +243,7 @@ class TestManualScopeSwimlane:
     def test_inner_parallel_loop_runs_concurrently(self, manual_scope_swimlane_data: dict):
         """Inner ``pl.parallel(N)`` iterations must overlap across cores.
 
-        With manual_scope and no cross-iteration ``add_dep``, the runtime
+        With manual_scope and no cross-iteration dependency edge, the runtime
         is free to dispatch all ``N`` tiles of one outer iteration to
         ``N`` different AIV cores. The assertion: across all tasks, at
         least 2 distinct ``core_id`` values appear (i.e. the runtime did
@@ -264,8 +263,7 @@ class TestManualScopeSwimlane:
     def test_no_blocking_serialization_chain(self, manual_scope_swimlane_data: dict):
         """No single task may fan out to more than the necessary downstream count.
 
-        If the manual-scope lowering phase of ``DeriveCallDirections``
-        mistakenly cross-linked iterations,
+        If the codegen mistakenly cross-linked iterations,
         stage1 of an early iteration would fan out to *every* later
         stage1/stage2 in the same scope, blowing up the fan-out count
         well past the per-iteration bound (which is 1: stage1 -> its own
@@ -296,10 +294,9 @@ class TestManualScopeSwimlane:
 #
 # Every task writes a disjoint ``TILE_M``-row stripe of ``out`` so the program
 # is numerically correct regardless of dep semantics — the value of these
-# tests is in the SWIMLANE shape: ``DeriveCallDirections`` (manual-scope
-# lowering phase) + array-carry
-# codegen must produce a phase fence keyed on ALL prior-phase tasks, not just
-# the last-dispatched one.
+# tests is in the SWIMLANE shape: the orchestration codegen's array-carry
+# lowering must produce a phase fence keyed on ALL prior-phase tasks, not
+# just the last-dispatched one.
 # ---------------------------------------------------------------------------
 
 
@@ -340,10 +337,23 @@ def _build_phase_fence_program():
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
+                # Phase fence: every kernel in phase P+1 must wait for ALL
+                # branches in phase P. Use an explicit ``Array[N_BRANCHES,
+                # TASK_ID]`` to hold one TaskId per branch slot — every
+                # parallel iter writes its own slot, and ``deps=[tids]``
+                # expands to N_BRANCHES guarded slot fills in the
+                # downstream task's ``set_dependencies`` array (one per slot
+                # of the previous phase).
+                # ``pl.array.create`` auto-initializes all slots to
+                # ``PTO2TaskId::invalid()``; the runtime fence skips
+                # invalid entries via ``is_valid()`` so the first phase
+                # has no prior-phase dependency.
+                tids = pl.array.create(N_BRANCHES, pl.TASK_ID)
                 for phase in pl.range(N_PHASES):
                     for branch in pl.parallel(N_BRANCHES):
                         row = (phase * N_BRANCHES + branch) * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids])
+                        tids[branch] = tid
             return out
 
     return PhaseFenceManualScope
@@ -491,7 +501,7 @@ class TestPhaseFenceSwimlane:
 #     Branch 3:  a30 -> a31 -> a32 -> a33    (linear chain)
 #
 # All 4 branches run in parallel; within a branch the 4 steps form a
-# strict ``add_dep`` chain. Codegen lowers this as outer-parallel
+# strict dependency chain. Codegen lowers this as outer-parallel
 # array-carry of size 4 plus an inner-sequential scalar carry — see
 # ``orchestration_codegen.cpp``.
 # ---------------------------------------------------------------------------
@@ -535,9 +545,15 @@ def _build_branch_chain_program():
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
                 for branch in pl.parallel(N_BRANCHES):
+                    # Per-branch sequential chain: thread the previous step's
+                    # TaskId through the inner ``pl.range`` iter_arg. The
+                    # first step seeds the carry with ``None`` (no producer
+                    # yet); ``set_dependencies`` skips the slot via
+                    # ``is_valid()``.
+                    prev_tid = None
                     for step in pl.range(N_STEPS):
                         row = step * N_BRANCHES * TILE_M + branch * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+                        out, prev_tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[prev_tid])
             return out
 
     return BranchChainManualScope
@@ -651,9 +667,8 @@ class TestBranchChainSwimlane:
         """Each task has at most 1 successor (next step in its own branch).
 
         A cross-branch dep would push ``fanout_count`` above 1 for at least
-        one task — indicating the manual-scope lowering phase of
-        ``DeriveCallDirections`` accidentally cross-linked sibling parallel
-        iterations.
+        one task — indicating the codegen accidentally cross-linked sibling
+        parallel iterations.
         """
         tasks = branch_chain_swimlane_data["tasks"]
         for t in tasks:

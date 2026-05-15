@@ -84,9 +84,9 @@ namespace {
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
-// bound on the explicit dep count, and codegen emits ``ArgWithDeps<N>`` with
-// N sized to each call's exact dep count, so there is no codegen-time cap on
-// per-task explicit dependencies.
+// bound on the explicit dep count, and codegen sizes each call's
+// ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
+// is no codegen-time cap on per-task explicit dependencies.
 
 int GetGMPipeSlotCount(int dir_mask) {
   const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
@@ -640,15 +640,42 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "Internal error: ArrayType iter_arg extent must be ConstInt, got "
             << array_ty->extent()->TypeName();
         const int64_t N = extent_const->value_;
-        const std::string cpp_dtype =
-            array_ty->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
-        std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "] = {0};\n";
-        // Init by slot-by-slot copy from the init array.
-        code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
-              << "[__init_i] = " << init_var_name << "[__init_i];\n";
+        const bool is_task_id_array = (array_ty->dtype_ == DataType::TASK_ID);
+        const std::string cpp_dtype = is_task_id_array ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
+
+        // An ArrayType carry is in-place-update semantics: the body's
+        // ``array.update_element`` aliases its LHS back to the carry's emit
+        // name, so every SSA rename of the same logical array can share one
+        // C-stack array. When the iter_arg's init value is itself a backing
+        // array (an ``array.create`` result or an enclosing loop's ArrayType
+        // carry), reuse it directly — no fresh declaration and no
+        // slot-by-slot copy-in are needed, and the matching yield self-copy
+        // is skipped in VisitStmt_(YieldStmtPtr). Otherwise (e.g. an
+        // ArrayType function parameter) fall back to a fresh backing array
+        // initialised by a slot-by-slot copy.
+        std::string carry_name;
+        auto init_var = AsVarLike(iter_arg->initValue_);
+        const ArrayCarryEntry* init_carry = nullptr;
+        if (init_var) {
+          auto it = array_carry_vars_.find(init_var.get());
+          if (it != array_carry_vars_.end() && it->second.size == N) init_carry = &it->second;
+        }
+        if (init_carry) {
+          carry_name = init_carry->array_name;
+        } else {
+          carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
+          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
+          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
+                << "[__init_i] = " << init_var_name << "[__init_i];\n";
+        }
         emit_name_map_[iter_arg.get()] = carry_name;
         emit_name_map_[return_var.get()] = carry_name;
+        // Register the iter_arg / return_var as array carries so a nested
+        // ForStmt seeded by either can reuse this same backing array, and a
+        // downstream ``deps=[arr]`` (TaskId arrays) expands into N guarded
+        // per-slot dependency fills.
+        RegisterArrayCarry(iter_arg.get(), carry_name, N);
+        RegisterArrayCarry(return_var.get(), carry_name, N);
       } else if (is_rebind[i]) {
         // Scalar (single-name) carry path — only fires for non-TaskId
         // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
@@ -841,36 +868,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (auto call = As<Call>(assign->value_)) {
       const std::string& op_name = call->op_->name_;
 
-      // Special-case TaskId synthesis ops (synthesized by LowerManualDepsToTaskId).
+      // Special-case TaskId ops emitted from the DSL surface. The producer
+      // TaskId of a ``pl.submit(...)`` call is handled separately (see
+      // ``GenerateSubmitReturnAliases``) — it is a tuple element of the
+      // kernel Call, not a standalone op.
       if (op_name == "system.task_invalid") {
+        // The Python literal ``None`` in a TaskId position lowers here.
         code_ << Indent() << "PTO2TaskId " << var_name << " = PTO2TaskId::invalid();\n";
-        return;
-      }
-      if (op_name == "system.task_id_of") {
-        // Argument is the producer Var; emit
-        //   ``PTO2TaskId <lhs> = task_<n>_outs.task_id();``
-        // and register the LHS as a string-variant entry so downstream
-        // ``add_dep`` consumers reference the LHS variable name directly
-        // (no need for a ``is_valid()`` guard here — task_id_of always
-        // produces a valid id).
-        INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
-            << "Internal error: system.task_id_of expects exactly 1 argument";
-        auto producer = AsVarLike(call->args_[0]);
-        INTERNAL_CHECK_SPAN(producer, assign->span_)
-            << "Internal error: system.task_id_of argument must be a Var";
-        auto it = manual_task_id_map_.find(producer.get());
-        INTERNAL_CHECK_SPAN(it != manual_task_id_map_.end(), assign->span_)
-            << "Internal error: system.task_id_of producer '" << producer->name_hint_
-            << "' has no task counter in current manual scope";
-        const int* idx = std::get_if<int>(&it->second);
-        INTERNAL_CHECK_SPAN(idx, assign->span_)
-            << "Internal error: system.task_id_of producer '" << producer->name_hint_
-            << "' is not a kernel-Call LHS (variant holds non-int)";
-        code_ << Indent() << "PTO2TaskId " << var_name << " = task_" << *idx << "_outs.task_id();\n";
-        // Register so downstream EmitManualDeps emits ``add_dep(<var_name>);``
-        // (string variant — but no is_valid guard since this id is known
-        // valid; the EmitManualDeps string branch unconditionally guards,
-        // which is harmless for a known-valid id).
+        // Register so a downstream ``deps=[<this var>]`` resolves to the
+        // emitted name (string variant). The ``is_valid()`` guard in
+        // ``EmitManualDeps`` skips the invalid sentinel at runtime.
         manual_task_id_map_[assign->var_.get()] = var_name;
         return;
       }
@@ -901,6 +908,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
           HandleArrayUpdateElementAssign(assign, call);
         }
         GenerateTensorOpCode(call, var_name, assign->var_);
+        // Register an ``array.create`` result as a backing array so a ForStmt
+        // ArrayType iter_arg seeded by it can reuse the same C-stack array
+        // instead of allocating a fresh one and copying in slot-by-slot.
+        if (op_name == "array.create") {
+          if (auto arr_ty = As<ArrayType>(assign->var_->GetType())) {
+            if (auto extent = As<ConstInt>(arr_ty->extent())) {
+              RegisterArrayCarry(assign->var_.get(), var_name, extent->value_);
+            }
+          }
+        }
       } else if (!IsBuiltinOp(op_name)) {
         std::string result_key;
         if (As<TupleType>(call->GetType())) {
@@ -922,6 +939,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
           if (effective_uses_.count(assign->var_.get())) {
             GenerateSingleReturnAlias(call, var_name);
           }
+        } else if (IsSubmitCall(call)) {
+          GenerateSubmitReturnAliases(call, task_idx_before);
         } else {
           GenerateTupleReturnAliases(call);
         }
@@ -984,7 +1003,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         auto inner_it = array_carry_vars_.find(yield_var.get());
         if (inner_it != array_carry_vars_.end()) {
           // Array → array slot-by-slot copy (Sequential outer receiving an
-          // inner Parallel's array).
+          // inner Parallel's array). When the yield value and the carry
+          // resolve to the *same* backing array, the body's
+          // ``array.update_element`` already wrote it in place — a
+          // slot-by-slot self-copy would be a useless no-op, so skip it.
+          if (inner_it->second.array_name == rv_arr.array_name) {
+            continue;
+          }
           INTERNAL_CHECK_SPAN(inner_it->second.size == rv_arr.size, yield_stmt->span_)
               << "Internal error: array-carry yield size mismatch (rv=" << rv_arr.size
               << ", yield=" << inner_it->second.size << ")";
@@ -1383,11 +1408,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (in_manual_scope_depth_ > 0) {
       // Manual scope: capture the submit's outputs so later code can call
       // ``.task_id()`` on it. We do NOT pre-emit a ``PTO2TaskId task_<n>``
-      // variable — instead, downstream consumers (system.task_id_of in IR,
-      // EmitManualDeps for direct deps) emit ``task_<n>_outs.task_id()``
-      // expressions directly. This avoids a redundant variable in the common
-      // case where the caller threads the task id through a TaskId iter_arg
-      // carry rather than referring to the kernel's task counter by name.
+      // variable — instead, ``GenerateSubmitReturnAliases`` binds the
+      // ``pl.submit`` producer-TaskId tuple element to
+      // ``task_<n>_outs.task_id()`` on demand. This avoids a redundant
+      // variable when the caller threads the task id through a TaskId
+      // iter_arg carry rather than referring to it by name.
       const std::string outs_var = "task_" + std::to_string(task_counter_) + "_outs";
       code_ << Indent() << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
     } else {
@@ -1396,10 +1421,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     task_counter_++;
   }
 
-  /// Upper bound on the number of ``add_dep`` entries that ``EmitManualDeps``
-  /// would emit for ``call``. Used to size the per-task ``ArgWithDeps<N>``
-  /// wrapper. Returns 0 outside a manual scope (auto scope derives deps from
-  /// data flow at runtime, so codegen emits no ``add_dep`` calls).
+  /// Upper bound on the number of dependency entries ``EmitManualDeps`` could
+  /// fill for ``call``. Used to size the per-task ``PTO2TaskId <task>_deps[K]``
+  /// stack array. Returns 0 outside a manual scope (auto scope derives deps
+  /// from data flow at runtime, so codegen emits no dependency entries).
   size_t CountManualDeps(const CallPtr& call) const {
     if (in_manual_scope_depth_ == 0) return 0;
     for (const auto& [k, v] : call->attrs_) {
@@ -1423,28 +1448,39 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return 0;
   }
 
-  /// Emit the per-task ``Arg`` (or ``ArgWithDeps<N>``) declaration. Sizes
-  /// ``N`` to the exact dep-edge count when in a manual scope; emits plain
-  /// ``Arg`` outside manual scope or when no edges are present.
-  void EmitTaskParamsDecl(const std::string& ind, const std::string& task_var, const CallPtr& call) {
-    const size_t dep_count = CountManualDeps(call);
-    if (dep_count == 0) {
-      code_ << ind << "Arg " << task_var << ";\n";
-    } else {
-      code_ << ind << "ArgWithDeps<" << dep_count << "> " << task_var << ";\n";
-    }
+  /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
+  /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
+  void EmitTaskParamsDecl(const std::string& ind, const std::string& task_var) {
+    code_ << ind << "Arg " << task_var << ";\n";
   }
 
-  /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
-  /// manual-scope lowering phase of ``DeriveCallDirections``. No-op outside a
-  /// manual scope (auto scope derives deps from data flow at runtime).
+  /// Emit the manual-scope dependency wiring for a kernel ``Call``: a
+  /// fixed-size ``PTO2TaskId <task>_deps[K]`` stack array filled with the
+  /// valid producer TaskIds from ``Call.attrs["manual_dep_edges"]``, followed
+  /// by a single ``<task>.set_dependencies(<task>_deps, <task>_deps_count)``.
+  ///
+  /// The edge list is written directly by the parser from a ``pl.submit(...)``
+  /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
+  /// ``Array[N, TASK_ID]`` that contributes one slot each. Every entry is
+  /// guarded by ``is_valid()``: any TaskId may legitimately hold the
+  /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
+  /// loop iteration's iter_arg carry, or an unwritten array slot — and an
+  /// invalid id must never reach ``set_dependencies``. The guard is a cheap
+  /// always-true branch for ids known valid. No-op outside a manual scope or
+  /// when there are no edges.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     if (in_manual_scope_depth_ == 0) return;
+    const size_t dep_capacity = CountManualDeps(call);
+    if (dep_capacity == 0) return;
     for (const auto& [k, v] : call->attrs_) {
       if (k != kAttrManualDepEdges) continue;
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       INTERNAL_CHECK_SPAN(edges != nullptr, call->span_)
           << "Internal error: " << kAttrManualDepEdges << " attr must hold std::vector<VarPtr>";
+      const std::string deps_arr = task_var + "_deps";
+      const std::string deps_cnt = task_var + "_deps_count";
+      code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << dep_capacity << "];\n";
+      code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
       for (const auto& edge : *edges) {
         if (!edge) continue;
         auto it = manual_task_id_map_.find(edge.get());
@@ -1453,39 +1489,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "' has no producer task in current manual scope";
         if (std::get_if<int>(&it->second)) {
           // Invariant: a ``manual_dep_edges`` entry should never resolve
-          // directly to a kernel-Call LHS (int-variant entry).
-          // ``LowerManualDepsToTaskId`` rewrites every dep edge Var to its
-          // ``system.task_id_of`` LHS (TaskIdType, string-variant entry).
-          // Hitting this branch means the pass was bypassed or the IR
-          // was hand-built without going through it.
+          // directly to a kernel-Call LHS (int-variant entry). The parser
+          // enforces that ``deps=[...]`` only accepts ``Scalar[TASK_ID]``
+          // Vars, so dep edges should always resolve to a TaskId binding
+          // (string variant) or a TaskId iter_arg array (vector variant).
           INTERNAL_CHECK_SPAN(false, call->span_)
               << "Internal error: manual_dep_edge var '" << edge->name_hint_
               << "' resolves to a kernel-Call LHS (int variant). Expected "
-              << "LowerManualDepsToTaskId to have rewritten this edge to a "
-              << "system.task_id_of LHS (TaskIdType, string variant).";
+              << "a Scalar[TASK_ID] Var (string variant).";
         } else if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
-          // Array-carry iter_arg: depend on every slot, each guarded by
-          // ``is_valid()`` (early-phase slots may still be invalid).
+          // Array-carry iter_arg: include every valid slot.
           for (const auto& name : *names) {
-            code_ << Indent() << "if (" << name << ".is_valid()) {\n";
-            code_ << Indent() << "    " << task_var << ".add_dep(" << name << ");\n";
-            code_ << Indent() << "}\n";
+            code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+                  << "++] = " << name << ";\n";
           }
         } else {
           const auto& name = std::get<std::string>(it->second);
-          // Iter-arg TaskId carries can be ``PTO2TaskId::invalid()`` on the
-          // first loop iteration; guard with is_valid(). For non-iter-arg
-          // string entries (e.g. task_id_of LHS) the value is always valid,
-          // so emit unguarded.
-          if (edge->GetKind() == ObjectKind::IterArg) {
-            code_ << Indent() << "if (" << name << ".is_valid()) {\n";
-            code_ << Indent() << "    " << task_var << ".add_dep(" << name << ");\n";
-            code_ << Indent() << "}\n";
-          } else {
-            code_ << Indent() << task_var << ".add_dep(" << name << ");\n";
-          }
+          // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
+          // — an iter_arg carry on the first loop iteration, or a ``None``
+          // (``system.task_invalid``) loop-carry seed. Guard every entry with
+          // ``is_valid()``; the branch is a harmless always-true test for ids
+          // already known valid.
+          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+                << "++] = " << name << ";\n";
         }
       }
+      code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
       break;
     }
   }
@@ -1717,7 +1746,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
-    EmitTaskParamsDecl(ind, task_var, call);
+    EmitTaskParamsDecl(ind, task_var);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
@@ -1749,7 +1778,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Spmd " << spmd_func->name_ << ": " << callee_name << "\n";
-    EmitTaskParamsDecl(ind, task_var, call);
+    EmitTaskParamsDecl(ind, task_var);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
@@ -1788,7 +1817,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string task_var = "params_t" + std::to_string(task_counter_);
       code_ << "\n";
       code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
-      EmitTaskParamsDecl(ind, task_var, call);
+      EmitTaskParamsDecl(ind, task_var);
       for (const auto& p : params) {
         code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
       }
@@ -1830,7 +1859,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     code_ << "\n";
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV lanes)\n";
-    EmitTaskParamsDecl(ind, task_var, call);
+    EmitTaskParamsDecl(ind, task_var);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
@@ -1955,6 +1984,97 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  /// A ``pl.submit(...)`` kernel call: a non-builtin Call whose return type is
+  /// the flat ``TupleType([*<kernel results>, Scalar[TASK_ID]])``. The trailing
+  /// ``Scalar[TASK_ID]`` element is the producer TaskId the DSL ``pl.submit``
+  /// construct captures; it distinguishes a submit call from an ordinary
+  /// multi-output kernel call (which has no TaskId tail element).
+  static bool IsSubmitCall(const CallPtr& call) {
+    auto tuple_ty = As<TupleType>(call->GetType());
+    if (!tuple_ty || tuple_ty->types_.empty()) return false;
+    auto last = As<ScalarType>(tuple_ty->types_.back());
+    return last != nullptr && last->dtype_ == DataType::TASK_ID;
+  }
+
+  /// Emit aliases for a ``pl.submit(...)`` kernel call. Tuple elements
+  /// ``0..N-1`` are the kernel's results — the Out/InOut-tensor elements are
+  /// aliased to the corresponding call args, exactly like an ordinary
+  /// multi-output kernel call. Element ``N`` (the trailing ``Scalar[TASK_ID]``)
+  /// is the producer TaskId: it is bound to ``task_<idx>_outs.task_id()`` and
+  /// registered in ``manual_task_id_map_`` so a downstream ``deps=[tid]``
+  /// resolves to the emitted name.
+  void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
+    auto tuple_key_it = call_to_tuple_key_.find(call.get());
+    if (tuple_key_it == call_to_tuple_key_.end()) return;
+    auto elements_it = tuple_var_to_elements_.find(tuple_key_it->second);
+    if (elements_it == tuple_var_to_elements_.end()) return;
+
+    auto tuple_ty = As<TupleType>(call->GetType());
+    INTERNAL_CHECK_SPAN(tuple_ty != nullptr && !tuple_ty->types_.empty(), call->span_)
+        << "Internal error: submit call must have a non-empty TupleType return";
+    const size_t n_outs = tuple_ty->types_.size() - 1;  // trailing element is the TaskId
+
+    FunctionPtr callee = program_->GetFunction(call->op_->name_);
+    INTERNAL_CHECK_SPAN(callee != nullptr, call->span_)
+        << "Internal error: submit callee '" << call->op_->name_ << "' not found";
+
+    // Kernel output param positions, in declared order.
+    auto call_arg_directions = call->GetArgDirections();
+    bool has_call_dirs = (call_arg_directions.size() == call->args_.size());
+    std::vector<size_t> out_indices;
+    if (has_call_dirs) {
+      for (size_t i = 0; i < call_arg_directions.size(); ++i) {
+        ArgDirection d = call_arg_directions[i];
+        if (d == ArgDirection::Output || d == ArgDirection::InOut || d == ArgDirection::OutputExisting) {
+          out_indices.push_back(i);
+        }
+      }
+    } else {
+      auto effective_dirs = GetEffectiveDirections(callee);
+      for (size_t i = 0; i < effective_dirs.size(); ++i) {
+        if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+          out_indices.push_back(i);
+        }
+      }
+    }
+
+    // Map the kernel-result portion (tuple elements ``[0, n_outs)``) onto the
+    // Out/InOut args. Some wrappers (notably SPMD helpers) return auxiliary
+    // scalars *before* the tensor outputs — mirror ``GenerateTupleReturnAliases``
+    // and tail-align: result element ``elem_pos`` is an Out/InOut tensor iff
+    // ``elem_pos >= tuple_out_base``, where ``tuple_out_base`` skips the
+    // leading aux elements. Leading aux scalars carry no runtime output and
+    // are left undeclared (a referenced one would be a codegen bug surfaced
+    // elsewhere, same as the non-submit path).
+    const size_t tuple_out_base = n_outs >= out_indices.size() ? (n_outs - out_indices.size()) : 0;
+
+    for (const auto& elem : elements_it->second) {
+      if (elem.index < 0) continue;
+      size_t elem_pos = static_cast<size_t>(elem.index);
+      if (elem_pos == n_outs) {
+        // The producer TaskId element. Bind it to ``task_<idx>_outs.task_id()``
+        // and register so a downstream ``deps=[tid]`` resolves to the name.
+        if (!effective_uses_.count(elem.var)) continue;  // unused (``out, _ = ...``)
+        std::string tid_name = ReserveVarEmitName(elem.var);
+        code_ << Indent() << "PTO2TaskId " << tid_name << " = task_" << task_idx << "_outs.task_id();\n";
+        manual_task_id_map_[elem.var] = tid_name;
+        continue;
+      }
+      // A kernel result element. Skip the trailing TaskId / out-of-range and
+      // the leading aux-scalar elements; the rest tail-align onto out_indices.
+      if (elem_pos >= n_outs || elem_pos < tuple_out_base) continue;
+      size_t out_pos = elem_pos - tuple_out_base;
+      if (out_pos >= out_indices.size()) continue;
+      if (!effective_uses_.count(elem.var)) continue;
+      size_t param_idx = out_indices[out_pos];
+      INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
+          << "Internal error: submit output element " << elem_pos << " maps to param_idx " << param_idx
+          << " out of range for " << call->op_->name_;
+      std::string elem_name = ReserveVarEmitName(elem.var);
+      EmitTensorAlias(elem_name, call, param_idx);
+    }
+  }
+
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
     bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
@@ -1992,6 +2112,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Internal error: array.update_element expects 3 arguments";
     std::string array_name = GenerateExprString(call->args_[0]);
     emit_name_map_[assign->var_.get()] = array_name;
+    // Propagate ``array_carry_vars_`` and ``manual_task_id_map_`` from the
+    // input array to the LHS: they share storage, so a downstream
+    // ``deps=[lhs]`` or array-yield treats them identically. Without this,
+    // a parallel iter_arg yielding the post-update Array would fall through
+    // ``array_carry_vars_.find(yield_var)`` and trip the scalar-yield branch.
+    if (auto input_var = AsVarLike(call->args_[0])) {
+      auto carry_it = array_carry_vars_.find(input_var.get());
+      if (carry_it != array_carry_vars_.end()) {
+        array_carry_vars_[assign->var_.get()] = carry_it->second;
+      }
+      auto tid_it = manual_task_id_map_.find(input_var.get());
+      if (tid_it != manual_task_id_map_.end()) {
+        manual_task_id_map_[assign->var_.get()] = tid_it->second;
+      }
+    }
   }
 
   std::string ReserveVarEmitName(const Var* var) {
@@ -2126,16 +2261,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Map from a producer ``Var`` to the task identity to use when it appears
   /// as a ``manual_dep_edge``. Three cases:
   ///   * ``int`` value: kernel-Call LHS, the int is the task counter assigned
-  ///     by ``EmitTaskSubmitAndBind``. Invariant-only: should be rewritten by
-  ///     ``LowerManualDepsToTaskId`` before reaching dep emission.
-  ///   * ``std::string`` value: a ``ForStmt`` TaskId iter_arg's emit name OR a
-  ///     ``system.task_id_of`` LHS emit name (single PTO2TaskId variable).
+  ///     by ``EmitTaskSubmitAndBind``. Invariant-only: parser-built dep edges
+  ///     are always ``Scalar[TASK_ID]`` Vars and resolve through the string
+  ///     branch; the int branch is reserved as a tripwire for hand-built IR.
+  ///   * ``std::string`` value: a ``ForStmt`` TaskId iter_arg's emit name, a
+  ///     ``pl.submit`` producer-TaskId tuple element's emit name, or a
+  ///     ``system.task_invalid`` (``None``) LHS emit name — a single
+  ///     ``PTO2TaskId`` variable.
   ///   * ``std::vector<std::string>`` value: a ``ForStmt`` TaskId iter_arg that
   ///     carries an *array* of task ids (Parallel ForStmt with const trip
   ///     count, or Sequential ForStmt propagating an inner Parallel array
   ///     across iterations). Each element of the vector is the C++ expression
   ///     naming one slot of the array (e.g. ``out_arr[0]``, ``out_arr[1]``).
-  ///     EmitManualDeps emits ``add_dep`` for each slot with is_valid() guard.
+  ///     EmitManualDeps fills each valid slot into the ``<task>_deps`` array.
   /// Cleared on entry to each manual scope.
   std::unordered_map<const Var*, std::variant<int, std::string, std::vector<std::string>>>
       manual_task_id_map_;

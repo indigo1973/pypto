@@ -134,9 +134,9 @@ class P:
 # ----------------------------------------------------------------------------
 # ForStmt with explicit ArrayType iter_arg — phase-fence carry shape.
 #
-# Phase-fence lowering produces ForStmts with explicit ArrayType iter_args
-# (the per-slot TaskId carry that fans out to N add_dep calls on every
-# downstream task). The DSL parser does NOT currently promote ``arr`` into a
+# Phase-fence carries produce ForStmts with explicit ArrayType iter_args
+# (the per-slot TaskId carry that fills N slots of the downstream task's
+# ``set_dependencies`` array). The DSL parser does NOT currently promote ``arr`` into a
 # loop-carried iter_arg when only ``arr[k] = ...`` writes happen inside the
 # loop body — those go through the LHS-alias path of update_element, so the
 # array stays in scope without crossing an iter_arg boundary. The phase-fence
@@ -186,39 +186,34 @@ def test_for_stmt_with_int_array_iter_arg_codegen():
     """Hand-built IR: ForStmt whose iter_arg is an ArrayType[INT64, 4].
 
     Each iteration calls ``array.update_element`` and yields the result as
-    the next iter's carry value. Codegen must:
+    the next iter's carry value. An ArrayType carry is in-place-update
+    semantics, so codegen reuses the ``array.create`` backing array directly:
 
-    * Emit a single C-stack array declaration with zero-initialization
-      (``int64_t <name>[4] = {0};``) at the loop prologue.
-    * Slot-by-slot copy from the init array into the carry array.
-    * Route in-place writes through the carry name via the body's
+    * Exactly one C-stack array declaration (the ``array.create`` result) —
+      the iter_arg and return_var alias it, no fresh carry array is emitted.
+    * No slot-by-slot copy-in / copy-out and no yield self-copy.
+    * In-place writes route through the shared array via the body's
       ``array.update_element`` LHS-alias mechanism.
-    * Skip the trivial yield self-copy (would be invalid C for raw arrays).
     """
     import re  # noqa: PLC0415
 
     program, orch_func = _build_array_iter_arg_program(DataType.INT64, 4)
     code = codegen.generate_orchestration(program, orch_func).code
 
-    # Carry array declared exactly once, with zero-init.
-    decls = re.findall(r"int64_t\s+(\w+)\[4\]\s*=\s*\{0\};", code)
-    assert len(decls) >= 1, code
-    carry_names = set(decls)
+    # Exactly one INT64[4] array is declared — the array.create result.
+    decls = re.findall(r"int64_t\s+(\w+)\[4\]", code)
+    assert len(decls) == 1, code
+    arr = decls[0]
 
-    # Init copy loop into one of the declared carry arrays.
-    init_loop_matches = re.findall(
-        r"for \(int64_t __init_i = 0; __init_i < 4; \+\+__init_i\) (\w+)\[__init_i\] = (\w+)\[__init_i\];",
-        code,
-    )
-    assert any(lhs in carry_names and rhs != lhs for lhs, rhs in init_loop_matches), code
+    # The iter_arg/return_var reuse it: no slot-by-slot copy loop is emitted.
+    assert "__init_i" not in code, code
+    assert "__yield_i" not in code, code
 
-    # Body write: ``<carry>[k] = k;`` via LHS-alias on update_element.
-    body_writes = re.findall(r"(\w+)\[k\]\s*=\s*k;", code)
-    assert any(name in carry_names for name in body_writes), code
+    # Body write lands in-place on the shared array.
+    assert f"{arr}[k] = k;" in code, code
 
-    # No "<carry> = <carry>" self-assign from the yield.
-    for name in carry_names:
-        assert f"{name} = {name};" not in code, code
+    # No "<arr> = <arr>" self-assign from the yield.
+    assert f"{arr} = {arr};" not in code, code
 
 
 def test_for_stmt_with_task_id_array_iter_arg_codegen():
@@ -374,12 +369,14 @@ def _build_nested_array_iter_arg_program(
 
 
 def test_nested_seq_parallel_task_id_array_carry_codegen():
-    """Phase-B-target nested shape: outer SEQ x inner PARALLEL ArrayType[TASK_ID, N] carry.
+    """Nested shape: outer SEQ x inner PARALLEL ArrayType[TASK_ID, N] carry.
 
-    Pins the three-fix invariant set: (1) PTO2TaskId, not 'unknown';
-    (2) outer carry exists as a distinct array; (3) inner init-copies from
-    the outer carry; (4) outer yield copies the inner rv back into the
-    outer carry slot-by-slot.
+    An ArrayType carry is in-place-update semantics, so all SSA renames of
+    the logical array (the ``array.create`` result, the outer carry, the
+    inner carry) collapse onto one C-stack array. Pins: (1) PTO2TaskId, not
+    'unknown'; (2) exactly one backing array, declared with the
+    ``PTO2TaskId::invalid()`` sentinel; (3) no copy-in / copy-out / yield
+    self-copy between distinct arrays.
     """
     import re  # noqa: PLC0415
 
@@ -391,62 +388,43 @@ def test_nested_seq_parallel_task_id_array_carry_codegen():
     # No fallback "unknown" dtype anywhere.
     assert "unknown" not in code, code
 
-    # Three PTO2TaskId arrays of extent N_INNER: the initial (from
-    # ``array.create``, now declared with explicit ``PTO2TaskId::invalid()``
-    # per-slot init), the outer carry, and the inner carry (both declared
-    # by the orchestration codegen's ForStmt iter_arg branch with
-    # ``= {0};`` aggregate init — the immediate slot-by-slot init copy
-    # overwrites the placeholder before any read).
+    # Exactly one PTO2TaskId[N] array — the array.create result, reused by
+    # both loop carries.
     decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{n_inner}\]", code)
-    assert len(decls) >= 3, code
+    assert len(decls) == 1, code
+    arr = decls[0]
     # ``array.create``'s output must use the invalid sentinel — anything
     # else (notably ``= {0};``) silently produces a "task id 0" reference
     # and breaks the runtime fence.
-    assert re.search(r"\w+\[__init_i\]\s*=\s*PTO2TaskId::invalid\(\);", code), code
+    assert re.search(rf"{arr}\[__init_i\]\s*=\s*PTO2TaskId::invalid\(\);", code), code
 
-    # Outer carry init copy: copy from the freshly-created initial array into
-    # the outer carry, both PTO2TaskId-typed.
-    init_loop = (
-        rf"for \(int64_t __init_i = 0; __init_i < {n_inner}; \+\+__init_i\)"
-        rf" (\w+)\[__init_i\] = (\w+)\[__init_i\];"
-    )
-    outer_init_copies = re.findall(init_loop, code)
-    assert len(outer_init_copies) >= 2, code  # outer init + inner init
+    # No slot-by-slot copy-in / copy-out between distinct arrays — the carries
+    # alias the single backing array.
+    assert not re.search(r"(\w+)\[__init_i\] = (\w+)\[__init_i\];", code), code
+    assert "__yield_i" not in code, code
 
-    # Outer yield-back copy: emitted by VisitStmt_(YieldStmtPtr)'s ArrayType
-    # rv branch — distinct from the __init_i loops above (uses __yield_i).
-    yield_loop = (
-        rf"for \(int64_t __yield_i = 0; __yield_i < {n_inner}; \+\+__yield_i\)"
-        rf" (\w+)\[__yield_i\] = (\w+)\[__yield_i\];"
-    )
-    yield_copies = re.findall(yield_loop, code)
-    assert len(yield_copies) >= 1, code
+    # Inner body write lands in-place on the shared array.
+    assert re.search(rf"{arr}\[branch\]\s*=\s*tid;", code), code
 
-    # Inner body write: ``<inner_carry>[branch] = tid;`` via update_element
-    # LHS-alias.
-    assert re.search(r"\w+\[branch\]\s*=\s*tid;", code), code
-
-    # No "<arr> = <arr>;" self-assignment (would be invalid C for arrays).
-    for name in set(decls):
-        assert f"{name} = {name};" not in code, code
+    # No "<arr> = <arr>;" self-assignment.
+    assert f"{arr} = {arr};" not in code, code
 
 
 def test_nested_seq_parallel_int_array_carry_codegen():
-    """Same nested shape with INT64 dtype — exercises the non-TASK_ID branch
-    of ``array.create``'s codegen plus the same alias-closure and yield
-    fixes."""
+    """Same nested shape with INT64 dtype — the non-TASK_ID branch of
+    ``array.create``'s codegen, with the same single-backing-array reuse."""
     import re  # noqa: PLC0415
 
     program, orch_func = _build_nested_array_iter_arg_program(DataType.INT64, 3, 4)
     code = codegen.generate_orchestration(program, orch_func).code
-    decls = re.findall(r"int64_t\s+\w+\[4\]\s*=\s*\{0\};", code)
-    assert len(decls) >= 3, code
-    yield_loop = (
-        r"for \(int64_t __yield_i = 0; __yield_i < 4; \+\+__yield_i\)"
-        r" (\w+)\[__yield_i\] = (\w+)\[__yield_i\];"
-    )
-    yield_copies = re.findall(yield_loop, code)
-    assert len(yield_copies) >= 1, code
+    # Exactly one INT64[4] array — the array.create result, reused by both
+    # loop carries; no copy-in / copy-out loops.
+    decls = re.findall(r"int64_t\s+(\w+)\[4\]", code)
+    assert len(decls) == 1, code
+    arr = decls[0]
+    assert "__init_i" not in code, code
+    assert "__yield_i" not in code, code
+    assert f"{arr}[branch] = branch;" in code, code
 
 
 if __name__ == "__main__":

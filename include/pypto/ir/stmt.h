@@ -892,13 +892,16 @@ using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
  * Marks a region wrapped by the simpler runtime's PTO2_SCOPE block. The
  * ``manual_`` flag picks between two modes:
  *   - manual_ = false → PTO2_SCOPE()                       (auto-dep via TensorMap)
- *   - manual_ = true  → PTO2_SCOPE(PTO2ScopeMode::MANUAL)  (no auto-dep, compiler emits add_dep)
+ *   - manual_ = true  → PTO2_SCOPE(PTO2ScopeMode::MANUAL)  (no auto-dep, explicit deps)
  *
- * Inside a manual=true region, the manual-scope lowering phase of
- * ``DeriveCallDirections`` walks SSA data flow plus user-supplied
- * ``deps=[...]`` on each kernel call to compute explicit dependency edges
- * (``Call.attrs[manual_dep_edges]``). Codegen reads those edges and emits
- * ``params.add_dep(...)`` calls.
+ * Inside a manual=true region, the parser writes the ``deps=[tid1, tid2]``
+ * list of a ``pl.submit(...)`` call directly into
+ * ``Call.attrs[manual_dep_edges]`` (each entry a ``Scalar[TASK_ID]`` Var — a
+ * prior submit's producer TaskId or the ``None`` sentinel — or an
+ * ``Array[N, TASK_ID]`` from ``pl.array.create(N, pl.TASK_ID)``). Codegen
+ * packs those edges into a stack ``PTO2TaskId[]`` array and emits a single
+ * ``params.set_dependencies(arr, count)`` call before the kernel submit
+ * (array entries contribute one slot each).
  *
  * The runtime forbids:
  *   - Manual scope nested inside another manual scope
