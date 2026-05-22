@@ -11,235 +11,157 @@
 
 This pass normalizes IR structure by:
 1. Unwrapping single-child SeqStmts (no redundant nesting)
-2. Preventing nested SeqStmts (SeqStmts as child of SeqStmts)
+2. Flattening nested SeqStmts (SeqStmts as child of SeqStmts)
 
-Tests use IR Builder to create before/expected programs (SeqStmts
-is not directly exposed in the Python DSL). Each test compares pass output
-with expected IR via assert_structural_equal.
+The DSL parser builds function bodies through ``IRBuilder``, whose
+``EndFunction``/loop/if scopes already emit ``stmts[0]`` for a single
+statement and a flat ``SeqStmts`` for multiple — it never produces a
+single-child or nested ``SeqStmts``. So the DSL-authored Before/Expected
+tests below only cover the no-op case (the pass leaves an already-flat body
+unchanged). The pass's actual rewrites are exercised by the raw ``ir.*``
+fixtures ``test_unwraps_single_child_seqstmts`` and
+``test_flattens_nested_seqstmts``, which construct the redundant shapes
+directly. A final raw-IR test exercises a structurally-invalid mid-body
+``YieldStmt`` that the DSL parser likewise cannot emit.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 
 
 def test_normalize_simple_function():
-    """Test normalizing function with single AssignStmt body."""
-    span = ir.Span.unknown()
+    """A function body that is a single bare statement is left untouched.
 
-    # Build Before IR: Function body is directly an AssignStmt
-    x_before = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign_before = ir.AssignStmt(
-        ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Before = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_before],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                assign_before,
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
+    The DSL parser emits a bare ``ReturnStmt`` (not a single-child
+    ``SeqStmts``) for a return-only body, so the pass has nothing to unwrap.
+    """
 
-    # Build Expected IR: Function body is the assign statement directly
-    # (single-child SeqStmts is unwrapped, so body is the assign directly)
-    x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign_expected = ir.AssignStmt(
-        ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Expected = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_expected],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                assign_expected,
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return pl.tensor.adds(x, 1.0)
 
-    # Apply pass and compare
     After = passes.normalize_stmt_structure()(Before)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(After, Before)
 
 
 def test_normalize_seqstmts_with_bare_assigns():
-    """Test normalizing SeqStmts containing bare AssignStmt (statements stay as direct children)."""
-    span = ir.Span.unknown()
+    """A flat SeqStmts of bare statements is left untouched.
 
-    # Build Before IR: SeqStmts([assign1, assign2]) - bare assigns
-    x_before = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    a_before = ir.Var("a", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    b_before = ir.Var("b", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign1_before = ir.AssignStmt(
-        a_before,
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    assign2_before = ir.AssignStmt(
-        b_before,
-        ir.Call(
-            ir.get_op("tensor.muls"),
-            [a_before, ir.ConstFloat(2.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Before = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_before],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.SeqStmts([assign1_before, assign2_before], span),
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
+    A multi-statement function body parses to a flat ``SeqStmts`` (no nesting,
+    no single-child wrapping), so the pass leaves it unchanged.
+    """
 
-    # Build Expected IR: SeqStmts([assign1, assign2])
-    # (assigns remain as direct children of SeqStmts)
-    x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    a_expected = ir.Var("a", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    b_expected = ir.Var("b", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign1_expected = ir.AssignStmt(
-        a_expected,
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    assign2_expected = ir.AssignStmt(
-        b_expected,
-        ir.Call(
-            ir.get_op("tensor.muls"),
-            [a_expected, ir.ConstFloat(2.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Expected = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_expected],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.SeqStmts([assign1_expected, assign2_expected], span),
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            a = pl.tensor.adds(x, 1.0)
+            b = pl.tensor.muls(a, 2.0)
+            return b
 
-    # Apply pass and compare
     After = passes.normalize_stmt_structure()(Before)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(After, Before)
 
 
 def test_idempotence():
-    """Test that applying normalize twice gives the same result."""
-    span = ir.Span.unknown()
+    """Applying normalize twice gives the same result."""
 
-    # Build Before IR: Function body is directly an AssignStmt
-    x_before = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign_before = ir.AssignStmt(
-        ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Before = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_before],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                assign_before,
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return pl.tensor.adds(x, 1.0)
 
-    # Build Expected IR: Function body is the assign statement directly
-    # (single-child SeqStmts is unwrapped, so body is the assign directly)
-    x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
-    assign_expected = ir.AssignStmt(
-        ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
-        ir.Call(
-            ir.get_op("tensor.adds"),
-            [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
-            ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
-            span,
-        ),
-        span,
-    )
-    Expected = ir.Program(
-        [
-            ir.Function(
-                "main",
-                [x_expected],
-                [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                assign_expected,
-                span,
-            )
-        ],
-        "test",
-        span,
-    )
-
-    # Apply pass once and compare
     After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Before)
+
+    # Apply pass again and verify idempotence.
+    After2 = passes.normalize_stmt_structure()(After)
+    ir.assert_structural_equal(After2, Before)
+
+
+def test_unwraps_single_child_seqstmts():
+    """A single-child ``SeqStmts`` function body is unwrapped to the bare stmt.
+
+    The DSL parser never emits a single-child ``SeqStmts`` (``IRBuilder``
+    emits ``stmts[0]`` directly), so this pass-input shape is built via raw
+    ``ir.*`` constructors.
+    """
+    span = ir.Span.unknown()
+    tensor_ty = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+    x = ir.Var("x", tensor_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        func = ir.Function("main", [x], [tensor_ty], body, span)
+        return ir.Program([func], "test_program", span)
+
+    ret = ir.ReturnStmt([x], span)
+    # Before: the function body is a redundant single-child SeqStmts.
+    Before = make_program(ir.SeqStmts([ret], span))
+    # Expected: the single child is unwrapped to a bare ReturnStmt.
+    Expected = make_program(ret)
+
+    # NormalizeStmtStructure repairs NoRedundantBlocks violations, so its input
+    # is by definition such a violation — which the structural-property verifier
+    # rejects before any pass runs. Disable verification so the repair pass can
+    # be exercised on the malformed input it exists to fix.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
     ir.assert_structural_equal(After, Expected)
 
-    # Apply pass again and verify idempotence
-    After2 = passes.normalize_stmt_structure()(After)
-    ir.assert_structural_equal(After2, Expected)
+
+def test_flattens_nested_seqstmts():
+    """A ``SeqStmts`` nested inside another ``SeqStmts`` is flattened to one level.
+
+    Built via raw ``ir.*`` constructors — the DSL parser always emits a flat
+    ``SeqStmts`` and never nests one inside another.
+    """
+    span = ir.Span.unknown()
+    tensor_ty = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+    x = ir.Var("x", tensor_ty, span)
+    a = ir.Var("a", tensor_ty, span)
+    b = ir.Var("b", tensor_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        func = ir.Function("main", [x], [tensor_ty], body, span)
+        return ir.Program([func], "test_program", span)
+
+    assign_a = ir.AssignStmt(
+        a,
+        ir.Call(ir.get_op("tensor.adds"), [x, ir.ConstFloat(1.0, DataType.FP32, span)], tensor_ty, span),
+        span,
+    )
+    assign_b = ir.AssignStmt(
+        b,
+        ir.Call(ir.get_op("tensor.muls"), [a, ir.ConstFloat(2.0, DataType.FP32, span)], tensor_ty, span),
+        span,
+    )
+    ret = ir.ReturnStmt([b], span)
+
+    # Before: the body's first child is itself a SeqStmts (one level of nesting).
+    Before = make_program(ir.SeqStmts([ir.SeqStmts([assign_a, assign_b], span), ret], span))
+    # Expected: the nested SeqStmts is absorbed into a single flat SeqStmts.
+    Expected = make_program(ir.SeqStmts([assign_a, assign_b, ret], span))
+
+    # NormalizeStmtStructure repairs NoRedundantBlocks violations, so its input
+    # is by definition such a violation — which the structural-property verifier
+    # rejects before any pass runs. Disable verification so the repair pass can
+    # be exercised on the malformed input it exists to fix.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_no_redundant_blocks_rejects_mid_body_yield():
     """NoRedundantBlocks rejects a YieldStmt at a non-trailing position of a
     SeqStmts. Function body has no iter_args context, so SSAVerify's
     CheckNoMidBodyYield does not apply — only the structural verifier catches it.
+
+    This input is built via raw ``ir.*`` constructors because the DSL parser
+    cannot emit a non-trailing ``YieldStmt`` in a plain function body.
     """
     span = ir.Span.unknown()
 
