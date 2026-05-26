@@ -745,6 +745,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       }
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
+      // Remember the base pointer so mid-body pl.read/pl.write resolve to !pto.ptr
+      // even after a slice-assign rebinds the var to its tensor_view.
+      RegisterBasePtr(var, GetVarName(var));
 
       for (const auto& j : tensor_type->shape_) {
         if (As<ir::ConstInt>(j)) {
@@ -1564,6 +1567,20 @@ void PTOCodegen::RegisterVarToMlir(const VarPtr& var, const std::string& mlir_na
 
 void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor_view_name) {
   BindTensorView(var, tensor_view_name);
+}
+
+void PTOCodegen::RegisterBasePtr(const VarPtr& var, const std::string& ptr_name) {
+  if (var && !ptr_name.empty()) fs_.tensor_to_base_ptr[GetVarKey(var)] = ptr_name;
+}
+
+std::string PTOCodegen::GetTensorBasePtr(const VarPtr& tensor) const {
+  auto it = fs_.tensor_to_base_ptr.find(GetVarKey(tensor));
+  if (it != fs_.tensor_to_base_ptr.end()) return it->second;
+  // For IterArg, follow initValue_ to the original tensor parameter (mirrors GetOrCreateTensorView).
+  if (auto iter_arg = As<ir::IterArg>(tensor)) {
+    if (auto init_var = AsVarLike(iter_arg->initValue_)) return GetTensorBasePtr(init_var);
+  }
+  return GetVarName(tensor);
 }
 
 int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) const {
