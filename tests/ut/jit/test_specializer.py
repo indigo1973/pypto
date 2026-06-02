@@ -233,10 +233,11 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, scalar_strs = _classify_params(func_def)
+        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "a" in tensor_params
         assert "b" in tensor_params
         assert len(out_params) == 0
+        assert not distributed_params
 
     def test_out_param(self):
         src = textwrap.dedent("""
@@ -244,10 +245,11 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, scalar_strs = _classify_params(func_def)
+        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "c" in out_params
         assert "c" in tensor_params
         assert "a" not in out_params
+        assert not distributed_params
 
     def test_out_param_subscripted_tensor(self):
         """Out[pl.Tensor[[64], pl.FP32]] should still be recognised as Out+tensor."""
@@ -256,9 +258,10 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        out_params, tensor_params, _ = _classify_params(func_def)
+        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
         assert "c" in out_params
         assert "c" in tensor_params
+        assert not distributed_params
 
     def test_scalar_bare_dtype(self):
         src = textwrap.dedent("""
@@ -266,9 +269,57 @@ class TestClassifyParams:
                 pass
         """)
         func_def = _parse_func(src)
-        _, _, scalar_strs = _classify_params(func_def)
+        _, _, scalar_strs, _ = _classify_params(func_def)
         assert "BLOCK_M" in scalar_strs
         assert "alpha" in scalar_strs
+
+    def test_distributed_tensor_subscripted(self):
+        """pld.DistributedTensor[[...], dtype] is classified as tensor + distributed."""
+        src = textwrap.dedent("""
+            def f(a: pl.Tensor[[64], pl.FP32],
+                  b: pld.DistributedTensor[[256], pl.INT8]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "a" in tensor_params
+        assert "b" in tensor_params
+        assert "a" not in distributed_params
+        assert "b" in distributed_params
+
+    def test_distributed_tensor_bare(self):
+        """Bare pld.DistributedTensor (no subscript) is classified as distributed."""
+        src = textwrap.dedent("""
+            def f(b: pld.DistributedTensor):
+                pass
+        """)
+        func_def = _parse_func(src)
+        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "b" in tensor_params
+        assert "b" in distributed_params
+
+    def test_distributed_tensor_bare_name(self):
+        """Bare DistributedTensor name (without pld. prefix) is also recognised."""
+        src = textwrap.dedent("""
+            def f(b: DistributedTensor):
+                pass
+        """)
+        func_def = _parse_func(src)
+        _, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "b" in tensor_params
+        assert "b" in distributed_params
+
+    def test_out_wrapped_distributed_tensor(self):
+        """Out[pld.DistributedTensor[...]] is Out + tensor + distributed."""
+        src = textwrap.dedent("""
+            def f(c: pl.Out[pld.DistributedTensor[[64], pl.FP32]]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        out_params, tensor_params, _, distributed_params = _classify_params(func_def)
+        assert "c" in out_params
+        assert "c" in tensor_params
+        assert "c" in distributed_params
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +643,93 @@ class TestSpecializer:
             {"a": TensorMeta((8,), DataType.FP32)},
         )
         assert "import pypto.language as pl" in out
+        # pld import is only emitted when a DistributedTensor param is present.
+        assert "import pypto.language.distributed" not in out
+
+    def test_distributed_tensor_annotation_filled(self):
+        src = """
+            def kernel(a: pld.DistributedTensor):
+                return a
+        """
+        out = self._specialize_simple(
+            src,
+            ["a"],
+            {"a": TensorMeta((256,), DataType.INT8)},
+        )
+        assert "pld.DistributedTensor[[256], pl.INT8]" in out
+        assert "import pypto.language.distributed as pld" in out
+
+    def test_distributed_tensor_subscripted_annotation_specialized(self):
+        """Subscripted pld.DistributedTensor annotations round-trip with concrete
+        shape/dtype from TensorMeta — same plumbing as pl.Tensor, only the head
+        type changes."""
+        src = """
+            def kernel(recv_x: pld.DistributedTensor[[256], pl.INT8]):
+                return recv_x
+        """
+        out = self._specialize_simple(
+            src,
+            ["recv_x"],
+            {"recv_x": TensorMeta((256,), DataType.INT8)},
+        )
+        assert "recv_x: pld.DistributedTensor[[256], pl.INT8]" in out
+        # The plain Tensor head must not leak through when the annotation is
+        # specifically DistributedTensor.
+        assert "recv_x: pl.Tensor" not in out
+
+    def test_mixed_tensor_and_distributed_tensor(self):
+        """A function mixing pl.Tensor and pld.DistributedTensor params emits
+        both head types and triggers the pld import."""
+        src = """
+            def kernel(indices: pl.Tensor, recv_x: pld.DistributedTensor):
+                return indices
+        """
+        out = self._specialize_simple(
+            src,
+            ["indices", "recv_x"],
+            {
+                "indices": TensorMeta((128,), DataType.INT32),
+                "recv_x": TensorMeta((256,), DataType.INT8),
+            },
+        )
+        assert "indices: pl.Tensor[[128], pl.INT32]" in out
+        assert "recv_x: pld.DistributedTensor[[256], pl.INT8]" in out
+        assert "import pypto.language.distributed as pld" in out
+
+    def test_distributed_tensor_return_annotation(self):
+        """Return-type inference must preserve the distributed head — a function
+        returning a pld.DistributedTensor must annotate the return as
+        ``pld.DistributedTensor[...]``, not ``pl.Tensor[...]`` (the two kinds
+        have distinct IR ObjectKind, so a leaked head type would be a real
+        type-system bug)."""
+        src = """
+            def kernel(recv_x: pld.DistributedTensor):
+                return recv_x
+        """
+        out = self._specialize_simple(
+            src,
+            ["recv_x"],
+            {"recv_x": TensorMeta((256,), DataType.INT8)},
+        )
+        assert "-> pld.DistributedTensor[[256], pl.INT8]" in out
+        assert "-> pl.Tensor" not in out
+
+    def test_distributed_tensor_tuple_return_annotation(self):
+        """Multi-return: the tuple element keeps the distributed head when the
+        returned name is a pld.DistributedTensor param."""
+        src = """
+            def kernel(a: pl.Tensor, recv_x: pld.DistributedTensor):
+                return a, recv_x
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "recv_x"],
+            {
+                "a": TensorMeta((128,), DataType.FP32),
+                "recv_x": TensorMeta((256,), DataType.INT8),
+            },
+        )
+        assert "-> tuple[pl.Tensor[[128], pl.FP32], pld.DistributedTensor[[256], pl.INT8]]" in out
 
     def test_incore_decorator_generated(self):
         src = """
