@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +209,77 @@ def test_disabled_perf_hint_silent():
 
 
 # ---------------------------------------------------------------------------
+# Memory-space awareness (issue #1305 ask 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_cube_matmul_program(k: int, dtype) -> ir.Program:
+    """Build an InCore matmul kernel whose tiles live in cube-private L0/L1.
+
+    A is loaded into Mat (L1) with a small inner ``k`` (below threshold), B into
+    Mat, both moved to Left/Right (L0A/L0B), multiplied into Acc (L0C), then
+    stored. The A-Mat load's innermost dim is below threshold but it never
+    traverses L2, so PH001 must not fire on it. ``n`` is chosen so the final
+    store's innermost dim meets the threshold and stays silent on its own.
+    """
+    m, n = 16, 32
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def matmul(
+            self,
+            a: pl.Tensor[[m, k], dtype],
+            b: pl.Tensor[[k, n], dtype],
+            c: pl.Out[pl.Tensor[[m, n], dtype]],
+        ) -> pl.Tensor[[m, n], dtype]:
+            tile_a_l1 = pl.load(a, offsets=[0, 0], shapes=[m, k], target_memory=pl.Mem.Mat)
+            tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[k, n], target_memory=pl.Mem.Mat)
+            tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.Mem.Left)
+            tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.Mem.Right)
+            tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
+            out_c = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=c)
+            return out_c
+
+    return Prog
+
+
+def test_cube_memory_space_not_flagged_a5():
+    """A5: cube-private (Mat/Left/Right/Acc) transfers are never flagged.
+
+    Mat/Left/Right/Acc are cube-private L0/L1 buffers that never traverse L2, so
+    the L2-cache-line threshold does not apply and PH001 must stay silent even
+    though the A-side tiles have an 8-element (32B) innermost dim, well below the
+    128B A5 recommendation.
+    """
+    _activate_a5()
+    program = _make_cube_matmul_program(8, pl.FP32)  # A-Mat innermost = 32B (< 128B)
+    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+        diags = _run_perf_hint_check(program)
+    perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
+    assert perf_hints == []
+
+
+# ---------------------------------------------------------------------------
+# Report clarity: (shape, dtype, target_memory) tuple (issue #1305 ask 5)
+# ---------------------------------------------------------------------------
+
+
+def test_message_includes_dtype_shape_memory_tuple_a5():
+    """The hint echoes the (dtype[innermost], target_memory) tuple it evaluated."""
+    _activate_a5()
+    program = _make_load_program(16, pl.FP32)  # Vec load, 64B innermost
+    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+        diags = _run_perf_hint_check(program)
+    perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
+    assert len(perf_hints) >= 1
+    msg = perf_hints[0].message
+    # innermost = 16 elements of fp32, default target_memory = Vec.
+    assert "fp32[16]" in msg
+    assert "target_memory=Vec" in msg
+
+
+# ---------------------------------------------------------------------------
 # Span propagation
 # ---------------------------------------------------------------------------
 
@@ -223,6 +295,74 @@ def test_span_propagates_to_tile_op():
     # parser attaches spans to every Call expression.
     spans_with_loc = [d.span for d in perf_hints if d.span.is_valid()]
     assert len(spans_with_loc) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Deduplication on transfer facts (issue #1305 ask 4)
+# ---------------------------------------------------------------------------
+
+
+def _site_of(diag: passes.Diagnostic) -> tuple[str, int, int, str]:
+    """The (file, line, col, op) site a diagnostic is keyed on for dedup.
+
+    The op name is the leading token of the message (``tile.load`` /
+    ``tile.store``), before the ``B`` byte figure / count suffix that vary per
+    transfer.
+    """
+    return (diag.span.filename, diag.span.begin_line, diag.span.begin_column, diag.message.split(" ", 1)[0])
+
+
+def test_dedup_collapses_repeated_site_a3():
+    """Repeated identical transfers at one source span collapse to a single hint
+    with an occurrence count (issue #1305 ask 4).
+
+    A per-iteration ``pl.load`` inside a ``pl.range`` loop expands, through the
+    default pipeline, into several identical GM<->Vec transfers that all carry
+    the originating source span. The verifier must collapse them into one
+    diagnostic with an ``(N occurrences ...)`` count rather than emit N separate
+    identical hints, and no two surviving hits may share a ``(file, line, col,
+    op)`` site. This is the post-pipeline shape the unit fixtures above (single
+    hand-built ops) cannot exercise, so the full pipeline is run here.
+    """
+    _activate_a3()
+    rows, inner = 64, 64  # fp32 inner = 256B < 512B (a3) -> fires; rows give the loop distinct offsets
+
+    @pl.program
+    class LoopLoadProg:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[rows, inner], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, inner], pl.FP32]],
+        ) -> pl.Tensor[[16, inner], pl.FP32]:
+            acc: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [0, 0], [16, inner])
+            for i in pl.range(4):
+                # Distinct offset per iteration (not loop-invariant, so it is not
+                # CSE'd) but identical shape/dtype/memory and source span — the
+                # exact "same site, same facts, many copies" case dedup targets.
+                t: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [i * 16, 0], [16, inner])
+                acc = pl.add(acc, t)
+            return pl.store(acc, [0, 0], out)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+        post = pm.run_passes(LoopLoadProg)
+        diags = _run_perf_hint_check(post)
+    perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
+    assert len(perf_hints) >= 1
+    assert all(d.hint_code == "PH001" for d in perf_hints)
+
+    # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)
+    # site — identical transfers were collapsed, not emitted repeatedly.
+    sites = [_site_of(d) for d in perf_hints]
+    assert len(sites) == len(set(sites)), f"hits not deduplicated per site: {sites}"
+
+    # The repeated per-iteration load must have collapsed into one counted hit
+    # (the count text only appears when count > 1), proving the collapse path ran
+    # rather than the loads slipping through as separate identical hints.
+    collapsed = [d for d in perf_hints if "occurrences at this source location" in d.message]
+    messages = [d.message for d in perf_hints]
+    assert len(collapsed) >= 1, f"expected a collapsed '(N occurrences)' hit, got {messages}"
 
 
 if __name__ == "__main__":
