@@ -4852,8 +4852,8 @@ class TestManualScopeCodegen:
             code,
         ), code
 
-    def test_manual_scope_merges_user_and_compiler_deps(self):
-        """Auto-deps: compiler deps merge with user deps in manual scope."""
+    def test_manual_scope_preserves_user_deps_without_compiler_deps(self):
+        """Auto-deps: user deps stay intact while manual scopes are skipped."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -4890,11 +4890,9 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "PTO2TaskId params_t2_deps[2];" in code
+        assert "PTO2TaskId params_t2_deps[1];" in code
         assert "params_t2_deps[params_t2_deps_count++] = user_tid;" in code
-        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
-        assert producer_tid, code
-        assert f"params_t2_deps[params_t2_deps_count++] = {producer_tid.group(1)};" in code
+        assert "task_0_outs.task_id()" not in code
         assert code.count("params_t2.set_dependencies(") == 1
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
@@ -5357,19 +5355,13 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
-        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
-        # `with pl.scope():` but reparse only under auto_scope=False — a
-        # pre-existing printer/parser gap unrelated to Submit deps.
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # With AutoDeriveTaskDependencies, loop-carried hazards (stage1 in the
-        # inner pl.parallel loop produces dynamic producers) trigger a manual→auto
-        # scope fallback.  The scope survives as AUTO; the intra-iteration user
-        # dep still wires correctly.
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
+        # User-written manual_scope is preserved; the intra-iteration user dep
+        # still wires correctly.
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
         assert "for (int64_t i = 0; i < 4; i += 1)" in code, code
         assert "for (int64_t j = 0; j < 8; j += 1)" in code, code
 
@@ -5453,17 +5445,13 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
-        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
-        # `with pl.scope():` but reparse only under auto_scope=False — a
-        # pre-existing printer/parser gap unrelated to Submit deps.
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # With AutoDeriveTaskDependencies, loop-carried hazards trigger a
-        # manual→auto scope fallback (same as the seq-outer/parallel-inner case).
-        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
+        # User-written manual_scope is preserved; the intra-iteration user dep
+        # still wires correctly.
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
         assert "for (int64_t i = 0; i < 8; i += 1)" in code, code
         assert "for (int64_t j = 0; j < 4; j += 1)" in code, code
 
@@ -5795,10 +5783,6 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        # Property-only verification: AutoDeriveTaskDependencies' manual->auto
-        # fallback yields hand-placed AUTO RuntimeScopeStmts, which print as
-        # `with pl.scope():` but reparse only under auto_scope=False — a
-        # pre-existing printer/parser gap unrelated to Submit deps.
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
