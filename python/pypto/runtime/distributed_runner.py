@@ -104,6 +104,25 @@ def _load_generated_module(path: Path) -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
+    # Generated modules live only in ``sys.modules`` — there is no
+    # ``_pypto_generated`` package on disk to re-import them by name. The
+    # runtime cloudpickles every registered callable to derive its hashid
+    # descriptor (runtime #891); without this, cloudpickle would serialize
+    # functions from this module *by reference* and fail to re-import
+    # ``_pypto_generated.<stem>`` (PicklingError). Force by-value pickling so
+    # the function code travels inside the payload.
+    #
+    # Best-effort: cloudpickle is a ``simpler`` (runtime) dependency, absent in
+    # lean codegen-only / unit-test environments. When it is missing the
+    # callable-registration path that needs by-value pickling cannot run
+    # either, so there is nothing to protect — skip the registration. The
+    # import is local so plain ``import pypto`` never requires cloudpickle.
+    try:
+        import cloudpickle  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+
+        cloudpickle.register_pickle_by_value(module)
+    except ImportError:
+        pass
     return module
 
 
@@ -257,8 +276,11 @@ def _register_callables(
     via COW (runtime PR #710); the emitted host_orch then dispatches via cids —
     ``orch.submit_sub(sub_ids[name], …)`` / ``orch.submit_next_level(callables[name], …)``.
     """
-    sub_ids: dict[str, int] = {name: w.register(fn) for name, fn in sub_worker_fns.items()}
-    chip_cids: dict[str, int] = {name: w.register(cc) for name, cc in chip_callables.items()}
+    # ``w.register`` returns an opaque ``CallableHandle`` (runtime #891); typed
+    # ``Any`` here and threaded straight back into ``submit_sub`` /
+    # ``submit_next_level``, which accept the handle.
+    sub_ids: dict[str, Any] = {name: w.register(fn) for name, fn in sub_worker_fns.items()}
+    chip_cids: dict[str, Any] = {name: w.register(cc) for name, cc in chip_callables.items()}
     return sub_ids, chip_cids
 
 
@@ -370,8 +392,8 @@ def _dispatch(
     w: Any,
     entry_fn: Any,
     tensors: dict[str, Any],
-    chip_cids: dict[str, int],
-    sub_ids: dict[str, int],
+    chip_cids: dict[str, Any],
+    sub_ids: dict[str, Any],
     call_config: Any,
     device_nums: int,
 ) -> Any:
