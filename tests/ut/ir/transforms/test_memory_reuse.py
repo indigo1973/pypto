@@ -18,7 +18,8 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, backend, ir, passes
+from pypto.backend import BackendType
 from pypto.ir.op import tile
 
 
@@ -871,9 +872,11 @@ class TestViewOps:
         """Retargeting a sharing group must preserve per-member subview offsets (issue #1723).
 
         ``dead`` dies before ``src``, so ``src`` (and its transpose/slice/reshape
-        view group) retargets onto ``dead``'s buffer. The two per-row slices sit
-        at byte offsets 0 and 64 within the group; after reuse they must keep
-        those distinct offsets, not collapse onto the target's base offset.
+        view group) retargets onto ``dead``'s buffer. ``srcT`` transposes the
+        *whole* ``src`` tile (input is not a sub-region), so it stays in-place and
+        joins the group. The two per-row slices sit at byte offsets 0 and 64
+        within the group; after reuse they must keep those distinct offsets, not
+        collapse onto the target's base offset.
         """
 
         @pl.program
@@ -918,7 +921,9 @@ class TestViewOps:
         # src retargets onto dead's buffer (reuse actually happened).
         assert members["src"][0] == members["dead"][0]
         base = members["dead"][0]
-        # The whole view group lives on that one base.
+        # srcT transposes the whole src tile (input is not a sub-region of a
+        # larger buffer), so it stays in-place and the whole view group lives on
+        # that one base.
         for name in ("srcT", "s0", "r0", "s1", "r1"):
             assert members[name][0] == base, f"{name} not on shared base {base}"
         # Row 0 slice/reshape at offset 0; row 1 slice/reshape at offset 64 — the
@@ -2980,6 +2985,76 @@ class TestL0CrossShapeReuse:
         # size gate keeps them in distinct buffers — reuse must not corrupt.
         assert bases["la"] is not bases["lc"], (
             "la ([16,64]) and lc ([16,128]) must NOT share — lc is larger (size gate)"
+        )
+
+
+class TestAscend910BLoadTpopHazard:
+    """MemoryReuse must not coalesce a writer that consumes a tile.load result
+    and a tile.tpop_from_aic value into the load's buffer on Ascend910B split-AIV
+    functions — that in-place sharing is a silent hardware hazard.  This guard
+    folds in the responsibility formerly owned by LegalizePTOBufferReuse.
+    """
+
+    @staticmethod
+    def _build_program():
+        """down_next = tile.add(down_prev=tile.load, pipe_chunk=tile.tpop_from_aic).
+
+        Each tile starts in its own buffer (pre-MemoryReuse state).  ``down_prev``
+        and ``pipe_chunk`` are both last-used at the ``tile.add``, so without the
+        hazard guard MemoryReuse would in-place-reuse ``down_prev``'s buffer for
+        ``down_next``.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_chunk)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        return Prog
+
+    def test_ascend910b_split_aiv_does_not_reuse_load_buffer(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = passes.memory_reuse()(self._build_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] != bases["down_prev"], (
+            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer "
+            f"(load+tpop_from_aic hazard), but both bind to {bases['down_prev']}"
+        )
+
+    def test_ascend950_allows_load_buffer_reuse(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        try:
+            After = passes.memory_reuse()(self._build_program())
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
+        assert bases["down_next"] == bases["down_prev"], (
+            "Ascend950 has no load+tpop hazard, so MemoryReuse should in-place-reuse the "
+            f"load buffer for the tile.add output; got down_next={bases['down_next']} "
+            f"down_prev={bases['down_prev']}"
         )
 
 
