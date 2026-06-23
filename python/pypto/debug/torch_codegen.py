@@ -861,6 +861,28 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
 _OP_MAP: dict[str, OpHandler] = {}
 
 
+def _register_reductions(m: dict, prefix: str) -> None:
+    """Register row/col reduction handlers (tile forms may carry an ignored tmp_tile)."""
+    m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
+    m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
+    m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
+    m[f"{prefix}.row_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-1, keepdim=True)"
+    m[f"{prefix}.col_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-2, keepdim=True)"
+    m[f"{prefix}.col_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-2, keepdim=True)"
+    m[f"{prefix}.col_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-2, keepdim=True)"
+    m[f"{prefix}.col_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-2, keepdim=True)"
+
+
+def _register_expands(m: dict, prefix: str) -> None:
+    """Register row/col expand max/min/expdif handlers (torch broadcasting)."""
+    m[f"{prefix}.row_expand_max"] = lambda a, _kw: f"torch.maximum({a[0]}, {a[1]})"
+    m[f"{prefix}.row_expand_min"] = lambda a, _kw: f"torch.minimum({a[0]}, {a[1]})"
+    m[f"{prefix}.row_expand_expdif"] = lambda a, _kw: f"torch.exp({a[0]} - {a[1]})"
+    m[f"{prefix}.col_expand_max"] = lambda a, _kw: f"torch.maximum({a[0]}, {a[1]})"
+    m[f"{prefix}.col_expand_min"] = lambda a, _kw: f"torch.minimum({a[0]}, {a[1]})"
+    m[f"{prefix}.col_expand_expdif"] = lambda a, _kw: f"torch.exp({a[0]} - {a[1]})"
+
+
 def _register_ops() -> None:  # noqa: PLR0915
     m = _OP_MAP
 
@@ -896,13 +918,8 @@ def _register_ops() -> None:  # noqa: PLR0915
         # cast
         m[f"{prefix}.cast"] = _handle_cast
 
-        # row reductions (take a tmp_tile arg in tile, ignore it)
-        m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
-        m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
-        m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
-
-        # col reductions — tile.col_sum may carry an optional tmp_tile arg; ignore it.
-        m[f"{prefix}.col_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-2, keepdim=True)"
+        # row / col reductions (tile forms may carry an ignored tmp_tile)
+        _register_reductions(m, prefix)
 
         # reshape / transpose / slice / concat
         m[f"{prefix}.reshape"] = lambda a, _kw: f"{a[0]}.reshape({a[1]})"
@@ -931,6 +948,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.col_expand"] = _expand_as_target()
         m[f"{prefix}.row_expand"] = _expand_as_target()
         m[f"{prefix}.expands"] = lambda a, _kw: f"torch.full_like({a[0]}, {a[1]})"
+        _register_expands(m, prefix)
 
     # --- Tensor-only ops ---
     m["tensor.matmul"] = _handle_tensor_matmul
